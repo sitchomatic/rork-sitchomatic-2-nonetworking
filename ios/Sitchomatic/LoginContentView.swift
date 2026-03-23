@@ -77,7 +77,7 @@ struct LoginContentView: View {
 
                 Spacer()
 
-                Text("iOS 26+ | WebKit Playwright | WireGuard Proxy")
+                Text("iOS 26+ | WebKit Playwright | NordVPN External")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.3))
                     .padding(.bottom, 20)
