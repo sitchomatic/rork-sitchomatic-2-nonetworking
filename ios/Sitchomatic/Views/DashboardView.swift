@@ -26,6 +26,10 @@ struct DashboardView: View {
                 pairsStatusHeader
                 healthAndStatsSection
                 quickActionRow
+                CredentialInsightsCard(
+                    credentials: credentials,
+                    onTapCredentials: { selectedTab = .credentials }
+                )
                 categoryGaugesSection
                 systemHealthRow
                 toolsSection
