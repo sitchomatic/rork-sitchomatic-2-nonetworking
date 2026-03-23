@@ -55,11 +55,24 @@ struct CredentialManagerView: View {
     }
 
     private var credentialStatsHeader: some View {
-        HStack(spacing: 10) {
-            statPill(value: "\(credentials.count)", label: "Total", color: NeonTheme.textPrimary)
-            statPill(value: "\(credentials.filter(\.isEnabled).count)", label: "Enabled", color: NeonTheme.neonGreen)
-            statPill(value: "\(credentials.filter { !$0.isEnabled }.count)", label: "Disabled", color: NeonTheme.textTertiary)
-            statPill(value: "\(credentials.filter { $0.totalAttempts > 0 }.count)", label: "Tested", color: NeonTheme.neonCyan)
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                statPill(value: "\(credentials.count)", label: "Total", color: NeonTheme.textPrimary)
+                statPill(value: "\(credentials.filter(\.isEnabled).count)", label: "Enabled", color: NeonTheme.neonGreen)
+                statPill(value: "\(credentials.filter { !$0.isEnabled }.count)", label: "Disabled", color: NeonTheme.textTertiary)
+                statPill(value: "\(credentials.filter { $0.totalAttempts > 0 }.count)", label: "Tested", color: NeonTheme.neonCyan)
+            }
+            let multiPwCount = credentials.filter { $0.hasMultiplePasswords }.count
+            if multiPwCount > 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "key.2.on.ring")
+                        .font(.system(size: 9))
+                        .foregroundStyle(NeonTheme.neonCyan)
+                    Text("\(multiPwCount) multi-password emails • Phased testing active")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(NeonTheme.neonCyan)
+                }
+            }
         }
         .padding(14)
         .background(
@@ -134,6 +147,10 @@ struct CredentialManagerView: View {
                     }
                 }
                 HStack(spacing: 8) {
+                    if cred.hasMultiplePasswords {
+                        Text("\(cred.passwordCount)pw")
+                            .foregroundStyle(NeonTheme.neonCyan)
+                    }
                     Text("\(cred.totalAttempts) attempts")
                         .foregroundStyle(NeonTheme.textTertiary)
                     if cred.successCount > 0 {
@@ -252,7 +269,7 @@ struct CredentialManagerView: View {
         NavigationStack {
             VStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("FORMAT: username:password (one per line)")
+                    Text("FORMAT: username:password (one per line)\nSame email with different passwords = auto-grouped for phased testing")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundStyle(NeonTheme.textTertiary)
                     TextEditor(text: $bulkText)
@@ -321,14 +338,45 @@ struct CredentialManagerView: View {
 
     private func importBulk() {
         let lines = bulkText.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+
+        var emailPasswordMap: [String: [String]] = [:]
+        var emailOrder: [String] = []
+
         for line in lines {
             let parts = line.components(separatedBy: ":")
             guard parts.count >= 2 else { continue }
             let username = parts[0].trimmingCharacters(in: .whitespaces)
             let password = parts.dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces)
             guard !username.isEmpty, !password.isEmpty else { continue }
-            credentials.append(LoginCredential(username: username, password: password))
+
+            let key = username.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            if emailPasswordMap[key] == nil {
+                emailPasswordMap[key] = []
+                emailOrder.append(key)
+            }
+            if !(emailPasswordMap[key]?.contains(password) ?? false) {
+                emailPasswordMap[key]?.append(password)
+            }
         }
+
+        for key in emailOrder {
+            guard let passwords = emailPasswordMap[key], !passwords.isEmpty else { continue }
+
+            if let existingIdx = credentials.firstIndex(where: { $0.username.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) == key }) {
+                for pw in passwords {
+                    credentials[existingIdx].addPassword(pw)
+                }
+                credentials[existingIdx].password = credentials[existingIdx].passwords[0]
+            } else {
+                let cred = LoginCredential(
+                    username: passwords.isEmpty ? key : key,
+                    password: passwords[0],
+                    passwords: passwords
+                )
+                credentials.append(cred)
+            }
+        }
+
         PersistenceService.shared.saveCredentials(credentials)
         bulkText = ""
     }

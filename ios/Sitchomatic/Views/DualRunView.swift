@@ -113,6 +113,10 @@ struct DualRunView: View {
                 neonMetricPill(title: "Runtime", value: engine.elapsedFormatted, color: NeonTheme.textSecondary)
             }
 
+            if engine.totalPasswordPhases > 1 {
+                passwordPhaseIndicator
+            }
+
             if engine.retryableCount > 0 && !engine.isRunning {
                 Button {
                     retryFailed()
@@ -138,6 +142,47 @@ struct DualRunView: View {
                 .fill(NeonTheme.cardBackground)
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(engine.isRunning ? NeonTheme.neonCyan.opacity(0.2) : NeonTheme.cardBorder, lineWidth: 0.5))
         )
+    }
+
+    private var passwordPhaseIndicator: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "key.2.on.ring")
+                    .font(.system(size: 10))
+                    .foregroundStyle(NeonTheme.neonCyan)
+                Text(engine.passwordPhaseLabel)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(NeonTheme.neonCyan)
+                Spacer()
+                Text("\(engine.phaseEmailsResolved) resolved")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(NeonTheme.neonGreen)
+                Text("\u{2022}")
+                    .foregroundStyle(NeonTheme.textTertiary)
+                    .font(.system(size: 8))
+                Text("\(engine.phaseEmailsSurviving) surviving")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(NeonTheme.neonOrange)
+            }
+
+            HStack(spacing: 4) {
+                ForEach(0..<engine.totalPasswordPhases, id: \.self) { phase in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(phase < engine.currentPasswordPhase ? NeonTheme.neonGreen :
+                              phase == engine.currentPasswordPhase && engine.isRunning ? NeonTheme.neonCyan :
+                              Color.white.opacity(0.1))
+                        .frame(height: 3)
+                }
+            }
+
+            Text(engine.scheduler.phaseEfficiencyGain())
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(NeonTheme.textTertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .background(NeonTheme.neonCyan.opacity(0.04), in: .rect(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.neonCyan.opacity(0.15), lineWidth: 0.5))
     }
 
     // MARK: - Live Overview

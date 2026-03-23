@@ -48,6 +48,9 @@ final class ConcurrentSession: Identifiable {
     let index: Int
     let waveIndex: Int
     let credential: LoginCredential
+    let passwordPhase: Int
+    let totalPasswordPhases: Int
+    let isFinalPasswordPhase: Bool
 
     private(set) var phase: SessionPhase = .queued
     private(set) var currentURL: String = ""
@@ -64,6 +67,10 @@ final class ConcurrentSession: Identifiable {
     private(set) var retryCount: Int = 0
     private(set) var isFlaggedForReview: Bool = false
 
+    var passwordPhaseLabel: String {
+        totalPasswordPhases > 1 ? "P\(passwordPhase + 1)/\(totalPasswordPhases)" : ""
+    }
+
     var elapsedTime: TimeInterval {
         guard let start = startTime else { return 0 }
         return (endTime ?? Date()).timeIntervalSince(start)
@@ -79,11 +86,14 @@ final class ConcurrentSession: Identifiable {
         return Double(stepsCompleted) / Double(totalSteps)
     }
 
-    init(index: Int, waveIndex: Int, credential: LoginCredential) {
+    init(index: Int, waveIndex: Int, credential: LoginCredential, passwordPhase: Int = 0, totalPasswordPhases: Int = 1, isFinalPasswordPhase: Bool = true) {
         self.id = UUID()
         self.index = index
         self.waveIndex = waveIndex
         self.credential = credential
+        self.passwordPhase = passwordPhase
+        self.totalPasswordPhases = totalPasswordPhases
+        self.isFinalPasswordPhase = isFinalPasswordPhase
     }
 
     func updatePhase(_ newPhase: SessionPhase) {
