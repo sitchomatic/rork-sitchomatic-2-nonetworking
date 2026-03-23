@@ -13,6 +13,7 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
+                SettingsStrategySection(settings: settings)
                 SettingsNordVPNSection(nordVPN: nordVPN)
                 SettingsSpeedModeSection(settings: settings)
                 SettingsConcurrencySection(settings: settings)
@@ -1051,6 +1052,88 @@ struct SettingsSiteURLsSection: View {
         let p: String = site.passwordSelectors.first ?? "n/a"
         let s: String = site.submitSelectors.first ?? "n/a"
         return "Selectors: \(u) \u{2022} \(p) \u{2022} \(s)"
+    }
+}
+
+// MARK: - Testing Strategy
+
+struct SettingsStrategySection: View {
+    @Bindable var settings: AutomationSettings
+
+    var body: some View {
+        NeonSettingsCard(title: "Testing Strategy", icon: "brain.head.profile") {
+            ForEach(TestingStrategy.allCases, id: \.self) { strategy in
+                let isSelected = settings.testingStrategy == strategy
+                let color = strategy == .original ? NeonTheme.neonCyan : NeonTheme.neonGreen
+
+                Button {
+                    settings.testingStrategy = strategy
+                    settings.save()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: strategy.iconName)
+                            .font(.system(size: 14))
+                            .foregroundStyle(isSelected ? color : NeonTheme.textTertiary)
+                            .frame(width: 28)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(strategy.displayName)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(isSelected ? NeonTheme.textPrimary : NeonTheme.textSecondary)
+                            Text(strategy.description)
+                                .font(.system(size: 9))
+                                .foregroundStyle(NeonTheme.textTertiary)
+                                .lineLimit(3)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 14))
+                            .foregroundStyle(isSelected ? color : NeonTheme.textTertiary)
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(isSelected ? color.opacity(0.06) : Color.clear)
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? color.opacity(0.2) : Color.clear, lineWidth: 0.5))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if settings.testingStrategy == .original {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(TestingStrategy.original.detailedRules, id: \.self) { rule in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("\u{2022}")
+                                .font(.system(size: 8))
+                                .foregroundStyle(NeonTheme.neonCyan)
+                            Text(rule)
+                                .font(.system(size: 9))
+                                .foregroundStyle(NeonTheme.textTertiary)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(NeonTheme.neonCyan.opacity(0.04), in: .rect(cornerRadius: 10))
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(TestingStrategy.threePasswords.detailedRules, id: \.self) { rule in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("\u{2022}")
+                                .font(.system(size: 8))
+                                .foregroundStyle(NeonTheme.neonGreen)
+                            Text(rule)
+                                .font(.system(size: 9))
+                                .foregroundStyle(NeonTheme.textTertiary)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(NeonTheme.neonGreen.opacity(0.04), in: .rect(cornerRadius: 10))
+            }
+        }
     }
 }
 

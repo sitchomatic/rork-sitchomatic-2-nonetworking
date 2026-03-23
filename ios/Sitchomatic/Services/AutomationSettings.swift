@@ -45,7 +45,9 @@ final class AutomationSettings {
 
     var nordVPNRotationEnabled: Bool = true
 
-    private let persistenceKey = "sitchomatic.v16.automationSettings"
+    var testingStrategy: TestingStrategy = .threePasswords
+
+    private let persistenceKey = "sitchomatic.v17.automationSettings"
 
     private init() {
         load()
@@ -88,7 +90,8 @@ final class AutomationSettings {
             "autoReconnect": autoReconnect,
             "maxNetworkRetries": maxNetworkRetries,
             "bandwidthMonitoring": bandwidthMonitoring,
-            "nordVPNRotationEnabled": nordVPNRotationEnabled
+            "nordVPNRotationEnabled": nordVPNRotationEnabled,
+            "testingStrategy": testingStrategy.rawValue
         ]
         UserDefaults.standard.set(dict, forKey: persistenceKey)
     }
@@ -153,6 +156,7 @@ final class AutomationSettings {
         if let val = dict["maxNetworkRetries"] as? Int { maxNetworkRetries = val }
         if let val = dict["bandwidthMonitoring"] as? Bool { bandwidthMonitoring = val }
         if let val = dict["nordVPNRotationEnabled"] as? Bool { nordVPNRotationEnabled = val }
+        if let raw = dict["testingStrategy"] as? String, let strat = TestingStrategy(rawValue: raw) { testingStrategy = strat }
     }
 
     private func applyDefaultURLsIfNeeded() {

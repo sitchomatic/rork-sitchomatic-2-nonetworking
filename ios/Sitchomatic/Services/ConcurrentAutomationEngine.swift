@@ -152,8 +152,11 @@ final class ConcurrentAutomationEngine {
         return min(suggested, configured)
     }
 
+    private(set) var activeStrategy: TestingStrategy = .threePasswords
+
     var passwordPhaseLabel: String {
-        totalPasswordPhases > 1 ? "P\(currentPasswordPhase + 1)/\(totalPasswordPhases)" : "Single Pass"
+        if activeStrategy == .original { return "Original" }
+        return totalPasswordPhases > 1 ? "P\(currentPasswordPhase + 1)/\(totalPasswordPhases)" : "Single Pass"
     }
 
     var engineDiagnostics: String {
@@ -242,16 +245,46 @@ final class ConcurrentAutomationEngine {
         lastWaveFailureRate = 0
         startTime = Date()
 
-        scheduler.prepare(credentials: enabledCredentials)
+        activeStrategy = settings.testingStrategy
+
+        let effectiveCredentials: [LoginCredential]
+        if activeStrategy == .original {
+            effectiveCredentials = enabledCredentials.map { cred in
+                LoginCredential(
+                    id: cred.id,
+                    username: cred.username,
+                    password: cred.password,
+                    passwords: [cred.password],
+                    displayName: cred.displayName,
+                    isEnabled: cred.isEnabled,
+                    lastAttemptDate: cred.lastAttemptDate,
+                    lastOutcome: cred.lastOutcome,
+                    totalAttempts: cred.totalAttempts,
+                    successCount: cred.successCount,
+                    failCount: cred.failCount,
+                    tags: cred.tags,
+                    lastTestedPasswordIndex: cred.lastTestedPasswordIndex,
+                    passwordPhaseOutcomes: cred.passwordPhaseOutcomes
+                )
+            }
+        } else {
+            effectiveCredentials = enabledCredentials
+        }
+
+        scheduler.prepare(credentials: effectiveCredentials)
         totalPasswordPhases = scheduler.maxPhase + 1
         phaseEmailsSurviving = scheduler.totalEmails
         phaseEmailsResolved = 0
 
-        let hasMultiPassword = enabledCredentials.contains { $0.hasMultiplePasswords }
-        if hasMultiPassword {
-            log(.phase, "PASSWORD-PHASED MODE: \(scheduler.totalEmails) unique emails, up to \(totalPasswordPhases) password phases — optimal minimum-clicks ordering active")
+        if activeStrategy == .original {
+            log(.phase, "ORIGINAL STRATEGY: \(effectiveCredentials.count) credentials — single password, wave-based, 4 attempts/site, early-stop + burn rules")
         } else {
-            log(.phase, "Single-password mode: \(enabledCredentials.count) credentials")
+            let hasMultiPassword = effectiveCredentials.contains { $0.hasMultiplePasswords }
+            if hasMultiPassword {
+                log(.phase, "3-PASSWORDS STRATEGY: \(scheduler.totalEmails) unique emails, up to \(totalPasswordPhases) password phases — optimal minimum-clicks ordering active")
+            } else {
+                log(.phase, "3-PASSWORDS STRATEGY (single-password): \(effectiveCredentials.count) credentials")
+            }
         }
 
         let phaseWorkItems = scheduler.workItemsForCurrentPhase()
@@ -270,7 +303,7 @@ final class ConcurrentAutomationEngine {
             ))
         }
 
-        log(.phase, "Phase \(currentPasswordPhase + 1)/\(totalPasswordPhases) — \(phaseWorkItems.count) emails, \(concurrency) concurrent pairs, \(totalWaves) waves, health: \(String(format: "%.0f", healthScore * 100))%")
+        log(.phase, "[\(activeStrategy.shortName)] Phase \(currentPasswordPhase + 1)/\(totalPasswordPhases) — \(phaseWorkItems.count) emails, \(concurrency) concurrent pairs, \(totalWaves) waves, health: \(String(format: "%.0f", healthScore * 100))%")
         haptics.runStart()
 
         sessionRecovery.saveCheckpoint(credentialIndex: 0, waveIndex: 0, phase: "starting")
@@ -400,6 +433,7 @@ final class ConcurrentAutomationEngine {
         totalPasswordPhases = 1
         phaseEmailsSurviving = 0
         phaseEmailsResolved = 0
+        activeStrategy = settings.testingStrategy
         startTime = nil
         lastWaveFailureRate = 0
         isAutoPaused = false

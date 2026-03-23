@@ -11,7 +11,13 @@ struct DualRunView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
+                if !engine.isRunning && engine.state != .completed {
+                    strategyPickerSection
+                }
                 controlPanel
+                if engine.isRunning || engine.state == .completed {
+                    activeStrategyBadge
+                }
                 liveOverviewSection
                 categoryBreakdownSection
                 sessionSection
@@ -48,7 +54,7 @@ struct DualRunView: View {
                             .foregroundStyle(NeonTheme.textPrimary)
                     }
 
-                    Text("\(enabledCredentialCount) enabled credentials \u{2022} \(settings.maxConcurrentPairs) max pairs")
+                    Text("\(enabledCredentialCount) enabled \u{2022} \(settings.maxConcurrentPairs) pairs \u{2022} \(settings.testingStrategy.shortName)")
                         .font(.system(size: 11))
                         .foregroundStyle(NeonTheme.textTertiary)
                 }
@@ -183,6 +189,96 @@ struct DualRunView: View {
         .padding(10)
         .background(NeonTheme.neonCyan.opacity(0.04), in: .rect(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.neonCyan.opacity(0.15), lineWidth: 0.5))
+    }
+
+    // MARK: - Strategy Picker
+
+    private var strategyPickerSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 11))
+                    .foregroundStyle(NeonTheme.neonCyan)
+                Text("TESTING STRATEGY")
+                    .font(.system(size: 10, weight: .black, design: .monospaced))
+                    .foregroundStyle(NeonTheme.textSecondary)
+            }
+
+            ForEach(TestingStrategy.allCases, id: \.self) { strategy in
+                Button {
+                    settings.testingStrategy = strategy
+                    settings.save()
+                } label: {
+                    let isSelected = settings.testingStrategy == strategy
+                    let color = strategy == .original ? NeonTheme.neonCyan : NeonTheme.neonGreen
+                    HStack(spacing: 10) {
+                        Image(systemName: strategy.iconName)
+                            .font(.system(size: 16))
+                            .foregroundStyle(isSelected ? color : NeonTheme.textTertiary)
+                            .frame(width: 30)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(strategy.displayName)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(isSelected ? NeonTheme.textPrimary : NeonTheme.textSecondary)
+                            Text(strategy.description)
+                                .font(.system(size: 9))
+                                .foregroundStyle(NeonTheme.textTertiary)
+                                .lineLimit(3)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(isSelected ? color : NeonTheme.textTertiary)
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(isSelected ? color.opacity(0.06) : Color.clear)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(isSelected ? color.opacity(0.25) : Color.white.opacity(0.04), lineWidth: 0.5))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(NeonTheme.cardBackground)
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(NeonTheme.cardBorder, lineWidth: 0.5))
+        )
+    }
+
+    private var activeStrategyBadge: some View {
+        let strategy = engine.activeStrategy
+        let color = strategy == .original ? NeonTheme.neonCyan : NeonTheme.neonGreen
+        return HStack(spacing: 8) {
+            Image(systemName: strategy.iconName)
+                .font(.system(size: 11))
+                .foregroundStyle(color)
+            Text(strategy.displayName.uppercased())
+                .font(.system(size: 10, weight: .black, design: .monospaced))
+                .foregroundStyle(color)
+            Spacer()
+            if strategy == .original {
+                Text("Single PW \u{2022} 4 attempts/site")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(NeonTheme.textTertiary)
+            } else {
+                Text(engine.passwordPhaseLabel)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(NeonTheme.textTertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(color.opacity(0.06))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.2), lineWidth: 0.5))
+        )
     }
 
     // MARK: - Live Overview
