@@ -1,12 +1,10 @@
 import Foundation
 import WebKit
-import Network
 
 nonisolated struct PairedPageResult: Sendable {
     let joePage: PlaywrightPage
     let ignitionPage: PlaywrightPage
-    let sharedProxySessionID: String
-    let sharedProxyEndpoint: String
+    let sharedSessionID: String
 }
 
 nonisolated enum DualLoginOutcome: String, Sendable, CaseIterable {
@@ -127,14 +125,14 @@ nonisolated struct CredentialWaveAssignment: Sendable {
     let credential: LoginCredential
     let waveIndex: Int
     let slotIndex: Int
-    let proxySessionID: String
+    let sessionID: String
 }
 
 nonisolated enum OrchestratorError: Error, LocalizedError, Sendable {
     case maxPagesReached(Int)
     case sessionNotStarted
     case pageNotFound
-    case noProxyAvailable
+    case noSessionAvailable
     case webViewPoolExhausted
     case credentialPairFailed(String)
     case backgroundTaskExpired
@@ -145,7 +143,7 @@ nonisolated enum OrchestratorError: Error, LocalizedError, Sendable {
         case .maxPagesReached(let max): "Maximum \(max) concurrent pages reached"
         case .sessionNotStarted: "Session not started — call startSession() first"
         case .pageNotFound: "Page not found in current session"
-        case .noProxyAvailable: "No proxy available for paired page creation"
+        case .noSessionAvailable: "No session available for paired page creation"
         case .webViewPoolExhausted: "WebView pool exhausted — all slots in use"
         case .credentialPairFailed(let reason): "Credential pair failed: \(reason)"
         case .backgroundTaskExpired: "Background task expired — session terminated"
@@ -160,7 +158,6 @@ nonisolated enum SessionLogCategory: String, Sendable {
     case network
     case error
     case dualMode
-    case proxy
     case stealth
     case trace
     case recovery
@@ -196,12 +193,11 @@ final class PlaywrightOrchestrator {
     private(set) var totalPairedSessionsRun: Int = 0
     private(set) var totalCredentialsProcessed: Int = 0
     private(set) var lastDualResults: [DualLoginResult] = []
-    private(set) var proxySessionMap: [String: String] = [:]
+    private(set) var sessionMap: [String: String] = [:]
 
     // MARK: - Private State
 
     private let pool: WebViewPool = .shared
-    private let networkManager: SimpleNetworkManager = .shared
     private let crashProtection: CrashProtectionService = .shared
     private let fileStorage: PersistentFileStorageService = .shared
     private let logger: DebugLogger = .shared
@@ -213,7 +209,7 @@ final class PlaywrightOrchestrator {
     private let maxConcurrentPairs: Int = 12
     private var sessionStartTime: Date?
     private var pageCounter: Int = 0
-    private var credentialProxyMap: [String: String] = [:]
+    private var credentialSessionMap: [String: String] = [:]
     private var activeSpeedMode: SpeedMode = .balanced
     private var recoveryAttempts: [String: Int] = [:]
     private let maxRecoveryAttempts: Int = 3
@@ -237,8 +233,8 @@ final class PlaywrightOrchestrator {
         pageCounter = 0
         activePairedSessions = 0
         lastDualResults.removeAll()
-        proxySessionMap.removeAll()
-        credentialProxyMap.removeAll()
+        sessionMap.removeAll()
+        credentialSessionMap.removeAll()
         recoveryAttempts.removeAll()
         activeSpeedMode = speedMode
         globalTracingEnabled = settings.enableTracing
@@ -253,19 +249,12 @@ final class PlaywrightOrchestrator {
             }
         }
 
-        if networkManager.connectionStatus == .disconnected {
-            statusMessage = "Connecting network..."
-            log(.network, "Network disconnected — initiating connection")
-            await networkManager.connect()
-            log(.network, "Network status: \(networkManager.connectionStatus.displayName)")
-        }
-
         crashProtection.startMonitoring()
         log(.recovery, "Crash protection monitoring active")
 
         isReady = true
         statusMessage = "Ready — Dual Mode"
-        log(.system, "Orchestrator ready — permanent Dual Mode — network: \(networkManager.connectionStatus.displayName)")
+        log(.system, "Orchestrator ready — permanent Dual Mode — NordVPN external")
     }
 
     func endSession() {
@@ -283,8 +272,8 @@ final class PlaywrightOrchestrator {
         pages.removeAll()
         pageCounter = 0
         activePairedSessions = 0
-        proxySessionMap.removeAll()
-        credentialProxyMap.removeAll()
+        sessionMap.removeAll()
+        credentialSessionMap.removeAll()
         crashProtection.stopMonitoring()
         isReady = false
         statusMessage = "Session ended"
@@ -318,12 +307,10 @@ final class PlaywrightOrchestrator {
         statusMessage = "Creating page \(pageCounter)..."
 
         let sessionID = "page-\(pageCounter)-\(UUID().uuidString.prefix(6))"
-        let networkConfig = networkManager.networkConfiguration(forSessionID: sessionID)
         let webView = await pool.acquire(
             sessionID: sessionID,
             stealthEnabled: settings.stealthEnabled,
             viewportSize: effectiveViewport,
-            networkConfig: networkConfig,
             target: .joe
         )
 
@@ -331,12 +318,7 @@ final class PlaywrightOrchestrator {
             injectEnhancedStealth(into: webView)
         }
 
-        let proxyEndpoint = networkManager.proxyEndpoint(forSessionID: sessionID)
-        if let ep = proxyEndpoint {
-            log(.proxy, "Page \(pageCounter) → proxy \(ep.host):\(ep.port)")
-        } else {
-            log(.proxy, "Page \(pageCounter) → direct connection")
-        }
+        log(.network, "Page \(pageCounter) → direct (NordVPN external)")
 
         let pageID = UUID()
         let page = PlaywrightPage(
@@ -383,45 +365,34 @@ final class PlaywrightOrchestrator {
         }
 
         let credentialKey = credential.id.uuidString
-        let sharedProxySessionID: String
-        if let existingSessionID = credentialProxyMap[credentialKey] {
-            sharedProxySessionID = existingSessionID
-            log(.proxy, "Reusing proxy session \(existingSessionID) for credential \(credential.displayName)")
+        let sharedSessionID: String
+        if let existingSessionID = credentialSessionMap[credentialKey] {
+            sharedSessionID = existingSessionID
+            log(.network, "Reusing session \(existingSessionID) for credential \(credential.displayName)")
         } else {
-            sharedProxySessionID = "dual-\(credentialKey.prefix(8))-\(UUID().uuidString.prefix(4))"
-            credentialProxyMap[credentialKey] = sharedProxySessionID
-            log(.proxy, "New shared proxy session \(sharedProxySessionID) for credential \(credential.displayName)")
+            sharedSessionID = "dual-\(credentialKey.prefix(8))-\(UUID().uuidString.prefix(4))"
+            credentialSessionMap[credentialKey] = sharedSessionID
+            log(.network, "New shared session \(sharedSessionID) for credential \(credential.displayName)")
         }
 
-        let sharedProxyEndpoint: String
-        if let ep = networkManager.proxyEndpoint(forSessionID: sharedProxySessionID) {
-            sharedProxyEndpoint = "\(ep.host):\(ep.port)"
-        } else {
-            sharedProxyEndpoint = "direct"
-            log(.proxy, "WARNING: No proxy available — paired pages will use direct connection")
-        }
-
-        proxySessionMap[credentialKey] = sharedProxyEndpoint
+        sessionMap[credentialKey] = sharedSessionID
         statusMessage = "Creating paired pages for \(credential.displayName)..."
 
-        log(.dualMode, "Creating paired pages — credential: \(credential.displayName), proxy: \(sharedProxyEndpoint)")
+        log(.dualMode, "Creating paired pages — credential: \(credential.displayName), session: \(sharedSessionID)")
 
-        let networkConfig = networkManager.networkConfiguration(forSessionID: sharedProxySessionID)
-        let joeSessionID = "\(sharedProxySessionID)-joe-\(UUID().uuidString.prefix(4))"
-        let ignitionSessionID = "\(sharedProxySessionID)-ignition-\(UUID().uuidString.prefix(4))"
+        let joeSessionID = "\(sharedSessionID)-joe-\(UUID().uuidString.prefix(4))"
+        let ignitionSessionID = "\(sharedSessionID)-ignition-\(UUID().uuidString.prefix(4))"
 
         async let joeWebViewTask: WKWebView = pool.acquire(
             sessionID: joeSessionID,
             stealthEnabled: settings.stealthEnabled,
             viewportSize: defaultViewportSize,
-            networkConfig: networkConfig,
             target: .joe
         )
         async let ignitionWebViewTask: WKWebView = pool.acquire(
             sessionID: ignitionSessionID,
             stealthEnabled: settings.stealthEnabled,
             viewportSize: defaultViewportSize,
-            networkConfig: networkConfig,
             target: .ignition
         )
 
@@ -462,14 +433,13 @@ final class PlaywrightOrchestrator {
 
         statusMessage = "Ready — \(pages.count) pages (\(activePairedSessions) pairs)"
 
-        log(.dualMode, "Paired pages created — joe: \(joePageID.uuidString.prefix(8)), ignition: \(ignitionPageID.uuidString.prefix(8)), shared proxy: \(sharedProxyEndpoint)")
+        log(.dualMode, "Paired pages created — joe: \(joePageID.uuidString.prefix(8)), ignition: \(ignitionPageID.uuidString.prefix(8)), session: \(sharedSessionID)")
         log(.stealth, "Both pages use isolated WebKit stores and process pools with independent history, cookies, and storage")
 
         return PairedPageResult(
             joePage: joePage,
             ignitionPage: ignitionPage,
-            sharedProxySessionID: sharedProxySessionID,
-            sharedProxyEndpoint: sharedProxyEndpoint
+            sharedSessionID: sharedSessionID
         )
     }
 
@@ -536,18 +506,6 @@ final class PlaywrightOrchestrator {
             }
         }
 
-        let preliminaryResult = DualLoginResult.combine(
-            credential: credential,
-            joeOutcome: joeOutcome,
-            ignitionOutcome: ignitionOutcome,
-            joeScreenshot: nil,
-            ignitionScreenshot: nil,
-            joeTrace: [],
-            ignitionTrace: [],
-            duration: Date().timeIntervalSince(startTime),
-            proxyUsed: pair.sharedProxyEndpoint
-        )
-
         joeScreenshot = try? await pair.joePage.screenshot()
         ignitionScreenshot = try? await pair.ignitionPage.screenshot()
 
@@ -564,7 +522,7 @@ final class PlaywrightOrchestrator {
             joeTrace: joeTrace,
             ignitionTrace: ignitionTrace,
             duration: duration,
-            proxyUsed: pair.sharedProxyEndpoint
+            proxyUsed: pair.sharedSessionID
         )
 
         if result.outcome != .success {
@@ -572,7 +530,7 @@ final class PlaywrightOrchestrator {
                 result: result,
                 joeURL: joeURL,
                 ignitionURL: ignitionURL,
-                proxySessionID: pair.sharedProxySessionID
+                sessionID: pair.sharedSessionID
             )
         }
 
@@ -580,7 +538,7 @@ final class PlaywrightOrchestrator {
         totalCredentialsProcessed += 1
         lastDualResults.append(result)
 
-        log(.dualMode, "Dual login complete — credential: \(credential.displayName), outcome: \(result.outcome.rawValue), joe: \(joeOutcome.rawValue), ignition: \(ignitionOutcome.rawValue), duration: \(String(format: "%.1f", duration))s, proxy: \(pair.sharedProxyEndpoint)")
+        log(.dualMode, "Dual login complete — credential: \(credential.displayName), outcome: \(result.outcome.rawValue), joe: \(joeOutcome.rawValue), ignition: \(ignitionOutcome.rawValue), duration: \(String(format: "%.1f", duration))s, session: \(pair.sharedSessionID)")
 
         return result
     }
@@ -759,7 +717,7 @@ final class PlaywrightOrchestrator {
         recoveryAttempts[credKey] = attempts + 1
         log(.recovery, "Recovering crashed pair (attempt \(attempts + 1)/\(maxRecoveryAttempts)) for \(credential.displayName)")
 
-        credentialProxyMap.removeValue(forKey: credKey)
+        credentialSessionMap.removeValue(forKey: credKey)
 
         let backoffMs = min(2000 * (attempts + 1), 10000)
         try await Task.sleep(for: .milliseconds(backoffMs))
@@ -801,15 +759,11 @@ final class PlaywrightOrchestrator {
     // MARK: - Network Status
 
     var networkStatusSummary: String {
-        networkManager.quickStatusLine
-    }
-
-    var activeProxyCount: Int {
-        networkManager.proxyCount
+        SimpleNetworkManager.shared.quickStatusLine
     }
 
     var connectionStatus: ConnectionStatus {
-        networkManager.connectionStatus
+        SimpleNetworkManager.shared.connectionStatus
     }
 
     // MARK: - Diagnostics
@@ -827,7 +781,7 @@ final class PlaywrightOrchestrator {
         Sitchomatic v16 | Mode: Permanent Dual | Speed: \(activeSpeedMode.displayName)
         Pages: \(pages.count)/\(maxConcurrentPages) | Pairs: \(activePairedSessions)/\(maxConcurrentPairs)
         Credentials Processed: \(totalCredentialsProcessed) | Paired Runs: \(totalPairedSessionsRun)
-        Network: \(networkManager.connectionStatus.displayName) | Proxies: \(networkManager.proxyCount)
+        Network: \(SimpleNetworkManager.shared.connectionStatus.displayName) | Mode: NordVPN (External)
         Pool: \(pool.diagnosticSummary)
         Memory: \(crashProtection.isMemorySafeForNewSession ? "OK" : crashProtection.isMemoryCritical ? "CRITICAL" : "HIGH")
         Uptime: \(uptime)
@@ -843,7 +797,6 @@ final class PlaywrightOrchestrator {
             if (window.__sitchoV16Stealth) return;
             window.__sitchoV16Stealth = true;
 
-            // Canvas fingerprint randomization
             var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
             HTMLCanvasElement.prototype.toDataURL = function(type) {
                 var ctx = this.getContext('2d');
@@ -857,7 +810,6 @@ final class PlaywrightOrchestrator {
                 return origToDataURL.apply(this, arguments);
             };
 
-            // WebGL fingerprint randomization
             var origGetParameter = WebGLRenderingContext.prototype.getParameter;
             WebGLRenderingContext.prototype.getParameter = function(param) {
                 if (param === 37445) return 'Apple Inc.';
@@ -865,7 +817,6 @@ final class PlaywrightOrchestrator {
                 return origGetParameter.apply(this, arguments);
             };
 
-            // AudioContext fingerprint randomization
             if (window.AudioContext || window.webkitAudioContext) {
                 var AC = window.AudioContext || window.webkitAudioContext;
                 var origCreateOscillator = AC.prototype.createOscillator;
@@ -882,7 +833,6 @@ final class PlaywrightOrchestrator {
                 };
             }
 
-            // Navigator property randomization
             Object.defineProperty(navigator, 'hardwareConcurrency', {
                 get: function() { return [4, 6, 8][Math.floor(Math.random() * 3)]; }
             });
@@ -890,15 +840,12 @@ final class PlaywrightOrchestrator {
                 get: function() { return [4, 6, 8][Math.floor(Math.random() * 3)]; }
             });
 
-            // Prevent WebDriver detection
             Object.defineProperty(navigator, 'webdriver', {
                 get: function() { return false; }
             });
 
-            // Chrome runtime spoof
             window.chrome = { runtime: {}, loadTimes: function() { return {}; }, csi: function() { return {}; } };
 
-            // Permissions API spoof
             if (navigator.permissions) {
                 var origQuery = navigator.permissions.query;
                 navigator.permissions.query = function(params) {
@@ -909,7 +856,6 @@ final class PlaywrightOrchestrator {
                 };
             }
 
-            // Plugins/MimeTypes spoof for mobile
             Object.defineProperty(navigator, 'plugins', {
                 get: function() { return []; }
             });
@@ -933,7 +879,7 @@ final class PlaywrightOrchestrator {
         result: DualLoginResult,
         joeURL: String,
         ignitionURL: String,
-        proxySessionID: String
+        sessionID: String
     ) {
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let artifactStem = sanitizedArtifactStem("\(result.credential.displayName)_\(timestamp)")
@@ -957,8 +903,8 @@ final class PlaywrightOrchestrator {
                 "ignitionOutcome": result.ignitionOutcome.rawValue,
                 "joeURL": joeURL,
                 "ignitionURL": ignitionURL,
-                "proxyUsed": result.proxyUsed,
-                "proxySessionID": proxySessionID,
+                "sessionUsed": result.proxyUsed,
+                "sessionID": sessionID,
                 "duration": result.duration,
                 "timestamp": timestamp,
                 "errorMessage": result.errorMessage ?? ""
@@ -1032,7 +978,7 @@ final class PlaywrightOrchestrator {
         switch category {
         case .system, .background: logCategory = .automation
         case .page, .stealth: logCategory = .webView
-        case .network, .proxy: logCategory = .network
+        case .network: logCategory = .network
         case .error, .recovery: logCategory = .automation
         case .dualMode, .speed: logCategory = .automation
         case .trace: logCategory = .webView

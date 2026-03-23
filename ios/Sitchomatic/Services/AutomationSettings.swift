@@ -36,13 +36,13 @@ final class AutomationSettings {
 
     var connectionTimeoutSeconds: Double = 30.0
     var requestTimeoutSeconds: Double = 60.0
-    var proxyRotationIntervalSeconds: Int = 0
     var dnsPreference: DNSPreference = .system
     var networkIsolationStrict: Bool = true
-    var proxyHealthCheckOnConnect: Bool = true
     var autoReconnect: Bool = true
     var maxNetworkRetries: Int = 3
     var bandwidthMonitoring: Bool = false
+
+    var nordVPNRotationEnabled: Bool = true
 
     private let persistenceKey = "sitchomatic.v16.automationSettings"
 
@@ -81,13 +81,12 @@ final class AutomationSettings {
             "cooldownBaseDuration": cooldownBaseDuration,
             "connectionTimeoutSeconds": connectionTimeoutSeconds,
             "requestTimeoutSeconds": requestTimeoutSeconds,
-            "proxyRotationIntervalSeconds": proxyRotationIntervalSeconds,
             "dnsPreference": dnsPreference.rawValue,
             "networkIsolationStrict": networkIsolationStrict,
-            "proxyHealthCheckOnConnect": proxyHealthCheckOnConnect,
             "autoReconnect": autoReconnect,
             "maxNetworkRetries": maxNetworkRetries,
-            "bandwidthMonitoring": bandwidthMonitoring
+            "bandwidthMonitoring": bandwidthMonitoring,
+            "nordVPNRotationEnabled": nordVPNRotationEnabled
         ]
         UserDefaults.standard.set(dict, forKey: persistenceKey)
     }
@@ -145,13 +144,12 @@ final class AutomationSettings {
         if let val = dict["cooldownBaseDuration"] as? Double { cooldownBaseDuration = val }
         if let val = dict["connectionTimeoutSeconds"] as? Double { connectionTimeoutSeconds = val }
         if let val = dict["requestTimeoutSeconds"] as? Double { requestTimeoutSeconds = val }
-        if let val = dict["proxyRotationIntervalSeconds"] as? Int { proxyRotationIntervalSeconds = val }
         if let raw = dict["dnsPreference"] as? String, let dns = DNSPreference(rawValue: raw) { dnsPreference = dns }
         if let val = dict["networkIsolationStrict"] as? Bool { networkIsolationStrict = val }
-        if let val = dict["proxyHealthCheckOnConnect"] as? Bool { proxyHealthCheckOnConnect = val }
         if let val = dict["autoReconnect"] as? Bool { autoReconnect = val }
         if let val = dict["maxNetworkRetries"] as? Int { maxNetworkRetries = val }
         if let val = dict["bandwidthMonitoring"] as? Bool { bandwidthMonitoring = val }
+        if let val = dict["nordVPNRotationEnabled"] as? Bool { nordVPNRotationEnabled = val }
     }
 
     private func applyDefaultURLsIfNeeded() {
@@ -170,13 +168,12 @@ final class AutomationSettings {
     func resetNetworkDefaults() {
         connectionTimeoutSeconds = 30.0
         requestTimeoutSeconds = 60.0
-        proxyRotationIntervalSeconds = 0
         dnsPreference = .system
         networkIsolationStrict = true
-        proxyHealthCheckOnConnect = true
         autoReconnect = true
         maxNetworkRetries = 3
         bandwidthMonitoring = false
+        nordVPNRotationEnabled = true
         save()
     }
 

@@ -44,12 +44,16 @@ final class WebViewPool {
         preWarmCount += slots
     }
 
+    enum SiteTarget: String, Sendable {
+        case joe
+        case ignition
+    }
+
     func acquire(
         sessionID: String,
         stealthEnabled: Bool = true,
         viewportSize: CGSize = CGSize(width: 390, height: 844),
-        networkConfig: ActiveNetworkConfig = .direct,
-        target: ProxyTarget = .joe
+        target: SiteTarget = .joe
     ) async -> WKWebView {
         _ = stealthEnabled
         _ = target
@@ -79,7 +83,7 @@ final class WebViewPool {
             }
         }
 
-        let webView = makeIsolatedWebView(viewportSize: viewportSize, networkConfig: networkConfig)
+        let webView = makeIsolatedWebView(viewportSize: viewportSize)
         if preWarmedSlots > 0 {
             preWarmedSlots -= 1
         }
@@ -151,35 +155,16 @@ final class WebViewPool {
         "Active: \(inUseCount)/\(hardCapActiveWebViews) | PreWarmed: \(preWarmedSlots) | Peak: \(peakActiveCount) | Created: \(totalCreated) | Released: \(totalReleased) | Crashes: \(processTerminationCount)"
     }
 
-    enum ProxyTarget: String, Sendable {
-        case joe
-        case ignition
-    }
-
-    private func makeIsolatedWebView(viewportSize: CGSize, networkConfig: ActiveNetworkConfig) -> WKWebView {
+    private func makeIsolatedWebView(viewportSize: CGSize) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.processPool = WKProcessPool()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        apply(networkConfig: networkConfig, to: configuration.websiteDataStore)
 
         let webView = WKWebView(frame: CGRect(origin: .zero, size: viewportSize), configuration: configuration)
         webView.customUserAgent = generateUserAgent()
         return webView
-    }
-
-    private func apply(networkConfig: ActiveNetworkConfig, to dataStore: WKWebsiteDataStore) {
-        switch networkConfig {
-        case .direct:
-            dataStore.proxyConfigurations = []
-        case .socks5(let host, let port):
-            if let proxyConfiguration = ProxyConfigurationHelper.createProxyConfiguration(host: host, port: port) {
-                dataStore.proxyConfigurations = [proxyConfiguration]
-            } else {
-                dataStore.proxyConfigurations = []
-            }
-        }
     }
 
     private func track(_ webView: WKWebView, sessionID: String, prefix: String) {
@@ -196,7 +181,6 @@ final class WebViewPool {
         webView.stopLoading()
         if wipeData {
             let dataStore = webView.configuration.websiteDataStore
-            dataStore.proxyConfigurations = []
             dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) { }
             webView.configuration.userContentController.removeAllUserScripts()
             HTTPCookieStorage.shared.removeCookies(since: .distantPast)

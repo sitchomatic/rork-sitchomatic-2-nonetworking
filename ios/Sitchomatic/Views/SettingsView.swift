@@ -7,18 +7,13 @@ struct SettingsView: View {
     @State private var showResetNetworkConfirm: Bool = false
     @State private var showResetMemoryConfirm: Bool = false
     @State private var showResetWebViewConfirm: Bool = false
-    @State private var wireGuardAccessKey: String = ""
-    @State private var wireGuardKeyError: String?
+    @State private var nordVPN = NordVPNRotationService.shared
     @State private var isMeasuringLatency: Bool = false
-    @State private var isRunningHealthCheck: Bool = false
 
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
-                SettingsWireGuardSection(
-                    wireGuardAccessKey: $wireGuardAccessKey,
-                    wireGuardKeyError: $wireGuardKeyError
-                )
+                SettingsNordVPNSection(nordVPN: nordVPN)
                 SettingsSpeedModeSection(settings: settings)
                 SettingsConcurrencySection(settings: settings)
                 SettingsTimingOverridesSection(settings: settings)
@@ -33,18 +28,12 @@ struct SettingsView: View {
                 )
                 SettingsNetworkConnectionSection(
                     networkManager: networkManager,
-                    hasStoredKey: hasStoredWireGuardAccessKey,
                     isMeasuringLatency: $isMeasuringLatency
                 )
                 SettingsNetworkConfigSection(
                     settings: settings,
                     networkManager: networkManager,
                     showResetConfirm: $showResetNetworkConfirm
-                )
-                SettingsProxyManagementSection(
-                    settings: settings,
-                    networkManager: networkManager,
-                    isRunningHealthCheck: $isRunningHealthCheck
                 )
                 SettingsDNSSection(settings: settings)
                 SettingsLoggingSection(settings: settings)
@@ -61,7 +50,7 @@ struct SettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(NeonTheme.trueBlack, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
-        .task { loadStoredWireGuardAccessKey() }
+        .task {}
         .alert("Clear All Data?", isPresented: $showClearConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Clear", role: .destructive) {
@@ -124,19 +113,6 @@ struct SettingsView: View {
         }
     }
 
-    private var hasStoredWireGuardAccessKey: Bool {
-        !wireGuardAccessKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func loadStoredWireGuardAccessKey() {
-        do {
-            wireGuardAccessKey = try WireGuardAccessKeyStore.load() ?? ""
-            wireGuardKeyError = nil
-        } catch {
-            wireGuardAccessKey = ""
-            wireGuardKeyError = "Unable to read the stored access key"
-        }
-    }
 }
 
 // MARK: - Shared Settings Components
@@ -239,88 +215,203 @@ struct NeonSliderRow: View {
     }
 }
 
-// MARK: - WireGuard
+// MARK: - NordVPN Rotation
 
-struct SettingsWireGuardSection: View {
-    @Binding var wireGuardAccessKey: String
-    @Binding var wireGuardKeyError: String?
-
-    private var trimmed: String {
-        wireGuardAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var hasKey: Bool { !trimmed.isEmpty }
+struct SettingsNordVPNSection: View {
+    @Bindable var nordVPN: NordVPNRotationService
+    @State private var isTestingShortcut: Bool = false
+    @State private var testResult: String?
 
     var body: some View {
-        NeonSettingsCard(title: "WireGuard", icon: "lock.shield") {
-            VStack(spacing: 10) {
-                SecureField("Single access key", text: $wireGuardAccessKey)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(NeonTheme.textPrimary)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .padding(10)
-                    .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.cardBorder, lineWidth: 0.5))
+        NeonSettingsCard(title: "NordVPN Rotation", icon: "shield.checkered") {
+            VStack(spacing: 12) {
+                ForEach(NordVPNRotationStrategy.allCases, id: \.self) { strategy in
+                    strategyToggle(strategy)
+                }
+
+                Divider().overlay(NeonTheme.cardBorder)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("SHORTCUT NAMES")
+                        .font(.system(size: 9, weight: .black, design: .monospaced))
+                        .foregroundStyle(NeonTheme.textTertiary)
+
+                    shortcutNameField(label: "Disconnect", text: $nordVPN.disconnectShortcutName)
+                    shortcutNameField(label: "Reconnect", text: $nordVPN.reconnectShortcutName)
+                    shortcutNameField(label: "Rotate", text: $nordVPN.rotateShortcutName)
+                }
+
+                NeonSliderRow(
+                    label: "Cooldown",
+                    valueText: String(format: "%.0fs", nordVPN.cooldownSeconds),
+                    color: NeonTheme.neonCyan,
+                    value: $nordVPN.cooldownSeconds,
+                    range: 5...60,
+                    step: 5
+                )
+
+                NeonSettingsRow(label: "Active Strategy") {
+                    Text(nordVPN.activeStrategyName)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(NeonTheme.neonGreen)
+                }
+
+                NeonSettingsRow(label: "Rotations") {
+                    Text("\(nordVPN.rotationCount)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(NeonTheme.textSecondary)
+                }
 
                 NeonSettingsRow(label: "Status") {
                     HStack(spacing: 4) {
-                        Image(systemName: hasKey ? "lock.shield.fill" : "shield.slash.fill")
-                            .font(.system(size: 10))
-                        Text(hasKey ? "Configured" : "Missing")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        Circle()
+                            .fill(nordVPN.isOnCooldown ? NeonTheme.neonOrange : NeonTheme.neonGreen)
+                            .frame(width: 6, height: 6)
+                        Text(nordVPN.isOnCooldown ? "Cooldown" : "Ready")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(nordVPN.isOnCooldown ? NeonTheme.neonOrange : NeonTheme.neonGreen)
                     }
-                    .foregroundStyle(hasKey ? NeonTheme.neonGreen : NeonTheme.textTertiary)
                 }
 
-                Button {
-                    saveKey()
-                } label: {
-                    Text("Save Securely")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.black)
+                if let error = nordVPN.lastError {
+                    Text(error)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(NeonTheme.neonRed)
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        isTestingShortcut = true
+                        Task {
+                            let success = await nordVPN.testShortcut(name: nordVPN.disconnectShortcutName)
+                            testResult = success ? "Shortcut opened" : "Failed to open shortcut"
+                            isTestingShortcut = false
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isTestingShortcut {
+                                ProgressView().scaleEffect(0.7).tint(NeonTheme.neonCyan)
+                            }
+                            Text("Test Shortcut")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .foregroundStyle(NeonTheme.neonCyan)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(NeonTheme.neonGreen, in: .rect(cornerRadius: 10))
-                }
-                .buttonStyle(.plain)
-                .disabled(trimmed.isEmpty)
-                .opacity(trimmed.isEmpty ? 0.4 : 1)
+                        .background(NeonTheme.neonCyan.opacity(0.08), in: .rect(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.neonCyan.opacity(0.2), lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isTestingShortcut)
 
-                if hasKey {
-                    NeonDestructiveButton(title: "Clear Stored Key") { clearKey() }
+                    Button {
+                        Task {
+                            await nordVPN.triggerRotation(reason: .manualRequest)
+                        }
+                    } label: {
+                        Text("Force Rotate")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(NeonTheme.neonOrange)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(NeonTheme.neonOrange.opacity(0.08), in: .rect(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.neonOrange.opacity(0.2), lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(nordVPN.isRotating || nordVPN.isOnCooldown)
+                    .opacity(nordVPN.isRotating || nordVPN.isOnCooldown ? 0.4 : 1)
                 }
 
-                if let wireGuardKeyError {
-                    Text(wireGuardKeyError)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(NeonTheme.neonRed)
+                if let result = testResult {
+                    Text(result)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(result.contains("Failed") ? NeonTheme.neonRed : NeonTheme.neonGreen)
+                }
+
+                NeonDestructiveButton(title: "Reset NordVPN Defaults") {
+                    nordVPN.resetToDefaults()
+                    testResult = nil
                 }
             }
 
-            Text("A single access key is kept in the device Keychain and reused across WireGuard tunnel sessions.")
+            Text("Configure Apple Shortcuts for NordVPN. Create \"NordVPN Disconnect\" and \"NordVPN Quick Connect\" shortcuts in the Shortcuts app using NordVPN's Siri Shortcuts feature.")
                 .font(.system(size: 9))
                 .foregroundStyle(NeonTheme.textTertiary)
         }
+        .onChange(of: nordVPN.disconnectShortcutName) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.reconnectShortcutName) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.rotateShortcutName) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.cooldownSeconds) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.shortcutDisconnectReconnectEnabled) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.autoRotationEnabled) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.manualNotificationEnabled) { _, _ in nordVPN.save() }
     }
 
-    private func saveKey() {
-        do {
-            try WireGuardAccessKeyStore.save(trimmed)
-            wireGuardAccessKey = trimmed
-            wireGuardKeyError = nil
-        } catch {
-            wireGuardKeyError = "Unable to save the access key securely"
+    private func strategyToggle(_ strategy: NordVPNRotationStrategy) -> some View {
+        Button {
+            switch strategy {
+            case .shortcutDisconnectReconnect:
+                nordVPN.shortcutDisconnectReconnectEnabled.toggle()
+            case .autoRotation:
+                nordVPN.autoRotationEnabled.toggle()
+            case .manualNotification:
+                nordVPN.manualNotificationEnabled.toggle()
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: strategy.iconName)
+                    .font(.system(size: 14))
+                    .foregroundStyle(isEnabled(strategy) ? NeonTheme.neonGreen : NeonTheme.textTertiary)
+                    .frame(width: 28)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(strategy.displayName)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(isEnabled(strategy) ? NeonTheme.textPrimary : NeonTheme.textSecondary)
+                    Text(strategy.description)
+                        .font(.system(size: 9))
+                        .foregroundStyle(NeonTheme.textTertiary)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                Image(systemName: isEnabled(strategy) ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(isEnabled(strategy) ? NeonTheme.neonGreen : NeonTheme.textTertiary)
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isEnabled(strategy) ? NeonTheme.neonGreen.opacity(0.06) : Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(isEnabled(strategy) ? NeonTheme.neonGreen.opacity(0.2) : Color.clear, lineWidth: 0.5))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func isEnabled(_ strategy: NordVPNRotationStrategy) -> Bool {
+        switch strategy {
+        case .shortcutDisconnectReconnect: nordVPN.shortcutDisconnectReconnectEnabled
+        case .autoRotation: nordVPN.autoRotationEnabled
+        case .manualNotification: nordVPN.manualNotificationEnabled
         }
     }
 
-    private func clearKey() {
-        do {
-            try WireGuardAccessKeyStore.delete()
-            wireGuardAccessKey = ""
-            wireGuardKeyError = nil
-        } catch {
-            wireGuardKeyError = "Unable to clear the stored access key"
+    private func shortcutNameField(label: String, text: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(NeonTheme.textSecondary)
+                .frame(width: 70, alignment: .leading)
+            TextField(label, text: text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(NeonTheme.textPrimary)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .padding(8)
+                .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NeonTheme.cardBorder, lineWidth: 0.5))
         }
     }
 }
@@ -617,7 +708,6 @@ struct SettingsMemoryProtectionSection: View {
 
 struct SettingsNetworkConnectionSection: View {
     @Bindable var networkManager: SimpleNetworkManager
-    let hasStoredKey: Bool
     @Binding var isMeasuringLatency: Bool
 
     var body: some View {
@@ -634,16 +724,10 @@ struct SettingsNetworkConnectionSection: View {
                 }
             }
 
-            NeonSettingsRow(label: "Proxies") {
-                Text("\(networkManager.proxyCount)")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(NeonTheme.textSecondary)
-            }
-
-            NeonSettingsRow(label: "Access Key") {
-                Text(hasStoredKey ? "Single-Key Ready" : "Not Set")
+            NeonSettingsRow(label: "Mode") {
+                Text("NordVPN (External)")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(hasStoredKey ? NeonTheme.neonGreen : NeonTheme.textTertiary)
+                    .foregroundStyle(NeonTheme.neonCyan)
             }
 
             if networkManager.lastLatencyMs != 0 {
@@ -749,6 +833,7 @@ struct SettingsNetworkConfigSection: View {
 
             NeonToggle(label: "Strict Network Isolation", isOn: $settings.networkIsolationStrict)
             NeonToggle(label: "Auto-Reconnect", isOn: $settings.autoReconnect)
+            NeonToggle(label: "NordVPN Auto-Rotation", isOn: $settings.nordVPNRotationEnabled)
 
             HStack {
                 Text("Max Retries")
@@ -786,7 +871,7 @@ struct SettingsNetworkConfigSection: View {
                 showResetConfirm = true
             }
 
-            Text("Strict isolation uses separate WebKit data stores per session.")
+            Text("Strict isolation uses separate WebKit data stores per session. NordVPN rotation triggers post-wave on perm disabled or fingerprinting detection.")
                 .font(.system(size: 9))
                 .foregroundStyle(NeonTheme.textTertiary)
         }
@@ -796,102 +881,7 @@ struct SettingsNetworkConfigSection: View {
         .onChange(of: settings.autoReconnect) { _, _ in settings.save() }
         .onChange(of: settings.maxNetworkRetries) { _, _ in settings.save() }
         .onChange(of: settings.bandwidthMonitoring) { _, _ in settings.save() }
-    }
-}
-
-// MARK: - Proxy Management
-
-struct SettingsProxyManagementSection: View {
-    @Bindable var settings: AutomationSettings
-    @Bindable var networkManager: SimpleNetworkManager
-    @Binding var isRunningHealthCheck: Bool
-
-    var body: some View {
-        NeonSettingsCard(title: "Proxy Management", icon: "arrow.triangle.swap") {
-            NeonToggle(label: "Health Check on Connect", isOn: $settings.proxyHealthCheckOnConnect)
-
-            HStack {
-                Text("Rotation Interval")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(NeonTheme.textSecondary)
-                Spacer()
-                Stepper(
-                    settings.proxyRotationIntervalSeconds > 0 ? "\(settings.proxyRotationIntervalSeconds)s" : "Off",
-                    value: $settings.proxyRotationIntervalSeconds,
-                    in: 0...600,
-                    step: 30
-                )
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(NeonTheme.neonCyan)
-            }
-
-            if !networkManager.proxyHealthStatus.isEmpty {
-                VStack(spacing: 4) {
-                    ForEach(Array(networkManager.proxyHealthStatus.sorted(by: { $0.key < $1.key })), id: \.key) { key, health in
-                        HStack(spacing: 8) {
-                            Image(systemName: health.iconName)
-                                .font(.system(size: 10))
-                                .foregroundStyle(proxyHealthColor(for: health))
-                            Text(key)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(NeonTheme.textSecondary)
-                            Spacer()
-                            Text(health.displayName)
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(proxyHealthColor(for: health))
-                        }
-                    }
-                }
-                .padding(10)
-                .background(Color.white.opacity(0.02), in: .rect(cornerRadius: 10))
-            }
-
-            Button {
-                isRunningHealthCheck = true
-                Task {
-                    await networkManager.runProxyHealthChecks()
-                    isRunningHealthCheck = false
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    if isRunningHealthCheck {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                            .tint(NeonTheme.neonCyan)
-                    }
-                    Text("Run Health Check")
-                        .font(.system(size: 12, weight: .bold))
-                }
-                .foregroundStyle(NeonTheme.neonCyan)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(NeonTheme.neonCyan.opacity(0.08), in: .rect(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.neonCyan.opacity(0.2), lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-            .disabled(isRunningHealthCheck || networkManager.proxyCount == 0)
-            .opacity(isRunningHealthCheck || networkManager.proxyCount == 0 ? 0.4 : 1)
-
-            NeonSettingsRow(label: "Healthy") {
-                Text("\(networkManager.healthyProxyCount)/\(networkManager.proxyCount)")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(NeonTheme.neonGreen)
-            }
-
-            Text("Set rotation to 0 to disable auto proxy cycling.")
-                .font(.system(size: 9))
-                .foregroundStyle(NeonTheme.textTertiary)
-        }
-        .onChange(of: settings.proxyHealthCheckOnConnect) { _, _ in settings.save() }
-        .onChange(of: settings.proxyRotationIntervalSeconds) { _, _ in settings.save() }
-    }
-
-    private func proxyHealthColor(for health: ProxyHealth) -> Color {
-        switch health {
-        case .healthy: NeonTheme.neonGreen
-        case .degraded: NeonTheme.neonOrange
-        case .unreachable: NeonTheme.neonRed
-        }
+        .onChange(of: settings.nordVPNRotationEnabled) { _, _ in settings.save() }
     }
 }
 
@@ -929,7 +919,7 @@ struct SettingsDNSSection: View {
                 }
             }
 
-            Text("DNS preference applies to WireGuard tunnel configurations.")
+            Text("DNS preference applies to network configurations.")
                 .font(.system(size: 9))
                 .foregroundStyle(NeonTheme.textTertiary)
         }

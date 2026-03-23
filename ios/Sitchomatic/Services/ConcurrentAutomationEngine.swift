@@ -31,9 +31,9 @@ nonisolated enum EngineState: String, Sendable {
     }
 }
 
-nonisolated struct TunnelPreWarmResult: Sendable {
-    let bridgesReady: Int
-    let bridgesFailed: Int
+nonisolated struct PreWarmResult: Sendable {
+    let sessionsReady: Int
+    let sessionsFailed: Int
     let durationMs: Int
 }
 
@@ -48,7 +48,7 @@ final class ConcurrentAutomationEngine {
     private(set) var currentWave: Int = 0
     private(set) var totalWaves: Int = 0
     private(set) var startTime: Date?
-    private(set) var preWarmResult: TunnelPreWarmResult?
+    private(set) var preWarmResult: PreWarmResult?
     private(set) var retryQueue: [LoginCredential] = []
     private(set) var lastWaveFailureRate: Double = 0
 
@@ -57,7 +57,6 @@ final class ConcurrentAutomationEngine {
     private var runTask: Task<Void, Never>?
     private var preWarmTask: Task<Void, Never>?
     private var memoryWatchTask: Task<Void, Never>?
-    private var preWarmedProxySessions: [String: String] = [:]
 
     private let orchestrator = PlaywrightOrchestrator.shared
     private let networkManager = SimpleNetworkManager.shared
@@ -159,53 +158,34 @@ final class ConcurrentAutomationEngine {
         Pool: \(poolInfo)
         \(bg)
         Retries queued: \(retryQueue.count) | Last wave fail rate: \(String(format: "%.0f", lastWaveFailureRate * 100))%
-        PreWarm: \(preWarmResult.map { "\($0.bridgesReady) ready, \($0.bridgesFailed) failed (\($0.durationMs)ms)" } ?? "none")
+        PreWarm: \(preWarmResult.map { "\($0.sessionsReady) ready, \($0.sessionsFailed) failed (\($0.durationMs)ms)" } ?? "none")
         """
     }
 
     private init() {}
 
-    // MARK: - Tunnel Pre-Warming
+    // MARK: - Pre-Warming
 
-    func preWarmTunnels(credentialCount: Int) {
+    func preWarmSessions(credentialCount: Int) {
         guard state == .idle || state == .completed || state == .failed || state == .cancelled else { return }
         state = .preWarming
-        log(.phase, "Pre-warming WireProxy tunnels for \(credentialCount) credential pairs")
+        log(.phase, "Pre-warming sessions for \(credentialCount) credential pairs")
 
         preWarmTask = Task { @MainActor in
             let startMs = CFAbsoluteTimeGetCurrent()
-
-            if networkManager.connectionStatus == .disconnected {
-                log(.network, "Connecting network for tunnel pre-warm...")
-                await networkManager.connect()
-            }
 
             let pairsNeeded = min(credentialCount, effectiveConcurrency)
             pool.preWarm(count: min(pairsNeeded * 2, 6), stealthEnabled: true)
             log(.phase, "Pre-warmed \(min(pairsNeeded * 2, 6)) WebViews in pool")
 
-            var bridgesReady = 0
-            var bridgesFailed = 0
-
-            for i in 0..<pairsNeeded {
-                guard !Task.isCancelled else { break }
-                let sessionID = "prewarm-\(i)-\(UUID().uuidString.prefix(4))"
-                if networkManager.proxyEndpoint(forSessionID: sessionID) != nil {
-                    preWarmedProxySessions["slot-\(i)"] = sessionID
-                    bridgesReady += 1
-                } else {
-                    bridgesFailed += 1
-                }
-            }
-
             let durationMs = Int((CFAbsoluteTimeGetCurrent() - startMs) * 1000)
-            preWarmResult = TunnelPreWarmResult(
-                bridgesReady: bridgesReady,
-                bridgesFailed: bridgesFailed,
+            preWarmResult = PreWarmResult(
+                sessionsReady: pairsNeeded,
+                sessionsFailed: 0,
                 durationMs: durationMs
             )
 
-            log(.network, "Tunnel pre-warm complete: \(bridgesReady) ready, \(bridgesFailed) failed (\(durationMs)ms)")
+            log(.network, "Pre-warm complete: \(pairsNeeded) ready (\(durationMs)ms)")
             state = .idle
         }
     }
@@ -213,7 +193,6 @@ final class ConcurrentAutomationEngine {
     func cancelPreWarm() {
         preWarmTask?.cancel()
         preWarmTask = nil
-        preWarmedProxySessions.removeAll()
         if state == .preWarming { state = .idle }
     }
 
@@ -373,7 +352,6 @@ final class ConcurrentAutomationEngine {
         sessions.removeAll()
         engineLog.removeAll()
         retryQueue.removeAll()
-        preWarmedProxySessions.removeAll()
         preWarmResult = nil
         currentWave = 0
         totalWaves = 0
@@ -431,15 +409,6 @@ final class ConcurrentAutomationEngine {
                 backgroundService.endBackgroundTask(identifier: "sitchomatic.engine")
                 return
             }
-        }
-
-        if networkManager.connectionStatus == .disconnected {
-            log(.network, "Connecting network...")
-            await networkManager.connect()
-        }
-
-        if networkManager.connectionStatus != .connected {
-            log(.error, "Network not connected — status: \(networkManager.connectionStatus.displayName)")
         }
 
         let waveCount = totalWaves
@@ -741,11 +710,6 @@ final class ConcurrentAutomationEngine {
             }
         }
 
-        if networkManager.connectionStatus == .disconnected {
-            log(.network, "Connecting network...")
-            await networkManager.connect()
-        }
-
         let waveCount = totalWaves
         for waveIdx in 0..<waveCount {
             guard !Task.isCancelled else { break }
@@ -788,14 +752,8 @@ final class ConcurrentAutomationEngine {
     private func executeRecordedSession(_ session: ConcurrentSession, config: WaveConfig) async {
         session.updatePhase(.launching)
 
-        let proxySessionID = "session-\(session.index)-\(UUID().uuidString.prefix(4))"
-        if let ep = networkManager.proxyEndpoint(forSessionID: proxySessionID) {
-            session.updateProxy("\(ep.host):\(ep.port)")
-        } else {
-            session.updateProxy("Direct")
-        }
-
-        session.log(.network, "Proxy: \(session.proxyInfo)")
+        session.updateProxy("NordVPN (External)")
+        session.log(.network, "Network: NordVPN external")
 
         let page: PlaywrightPage
         do {
