@@ -72,6 +72,7 @@ final class ConcurrentAutomationEngine {
     private let logger = DebugLogger.shared
     private let haptics = HapticService.shared
     private let widgetService = WidgetDataService.shared
+    private let nordVPN = NordVPNRotationService.shared
 
     var succeededCount: Int { sessions.filter { $0.phase == .succeeded }.count }
     var failedCount: Int { sessions.filter { $0.phase == .failed }.count }
@@ -494,6 +495,10 @@ final class ConcurrentAutomationEngine {
 
             persistWaveResults(waveSessions)
 
+            if settings.nordVPNRotationEnabled && !Task.isCancelled {
+                await checkAndTriggerNordVPNRotation(waveSessions: waveSessions)
+            }
+
             if waveIdx < waveCount - 1 && !Task.isCancelled {
                 var delay = settings.interWaveDelaySeconds
                 if lastWaveFailureRate > 0.5 {
@@ -611,6 +616,12 @@ final class ConcurrentAutomationEngine {
                 haptics.credentialFailure()
                 session.log(.result, "\(result.outcome.longName) — no retry")
                 updateCredentialResult(session.credential, outcome: result)
+                if settings.nordVPNRotationEnabled {
+                    log(.network, "Perm disabled detected for \(session.credential.displayName) — flagging NordVPN rotation")
+                    Task { @MainActor in
+                        await self.nordVPN.triggerRotation(reason: .permDisabledDetected)
+                    }
+                }
                 return
 
             case .tempDisabled, .error:
@@ -904,6 +915,43 @@ final class ConcurrentAutomationEngine {
         }
 
         session.updatePhase(.succeeded)
+    }
+
+    // MARK: - Private: NordVPN Rotation Check
+
+    private func checkAndTriggerNordVPNRotation(waveSessions: [ConcurrentSession]) async {
+        let wavePermDisabled = waveSessions.filter { $0.dualResult?.outcome == .permDisabled }.count
+        let waveFailed = waveSessions.filter { $0.phase == .failed }.count
+        let waveTotal = waveSessions.count
+        let waveFailRate = waveTotal > 0 ? Double(waveFailed) / Double(waveTotal) : 0
+        let consecutiveErrors = waveSessions.suffix(3).filter { $0.dualResult?.outcome == .error }.count
+
+        guard let reason = nordVPN.shouldTriggerRotation(
+            permDisabledCount: wavePermDisabled,
+            failureRate: waveFailRate,
+            consecutiveErrors: consecutiveErrors
+        ) else { return }
+
+        log(.network, "NordVPN rotation triggered post-wave — reason: \(reason.rawValue) (permDisabled: \(wavePermDisabled), failRate: \(String(format: "%.0f", waveFailRate * 100))%, errors: \(consecutiveErrors))")
+
+        let wasRunning = state == .running
+        if wasRunning {
+            state = .paused
+            isPauseRequested = true
+            log(.phase, "Engine paused for NordVPN rotation")
+        }
+
+        await nordVPN.triggerRotation(reason: reason)
+
+        log(.network, "NordVPN rotation complete — waiting for connection to stabilise")
+        try? await Task.sleep(for: .seconds(3))
+
+        if wasRunning && !Task.isCancelled {
+            isPauseRequested = false
+            isAutoPaused = false
+            state = .running
+            log(.phase, "Engine resumed after NordVPN rotation")
+        }
     }
 
     // MARK: - Private: Emergency State Persistence
