@@ -8,6 +8,7 @@ struct CredentialManagerView: View {
     @State private var bulkText: String = ""
     @State private var showBulkImport: Bool = false
     @State private var searchText: String = ""
+    @State private var exclusionList = ExclusionListService.shared
 
     private var filteredCredentials: [LoginCredential] {
         guard !searchText.isEmpty else { return credentials }
@@ -89,18 +90,49 @@ struct CredentialManagerView: View {
     }
 
     private func credentialRow(_ cred: LoginCredential) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: cred.statusIcon)
-                .font(.system(size: 14))
-                .foregroundStyle(credStatusColor(cred))
-                .frame(width: 28, height: 28)
-                .background(credStatusColor(cred).opacity(0.1), in: .rect(cornerRadius: 8))
+        let isExcluded = exclusionList.isFullyExcluded(email: cred.username)
+        let permSites = exclusionList.permExcludedSites(for: cred.username)
+        let isNoAccount = exclusionList.isNoAccount(email: cred.username)
+
+        return HStack(spacing: 12) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: cred.statusIcon)
+                    .font(.system(size: 14))
+                    .foregroundStyle(credStatusColor(cred))
+                    .frame(width: 28, height: 28)
+                    .background(credStatusColor(cred).opacity(0.1), in: .rect(cornerRadius: 8))
+                if isExcluded {
+                    Image(systemName: "nosign")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 12, height: 12)
+                        .background(NeonTheme.neonRed, in: Circle())
+                        .offset(x: 3, y: 3)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(cred.username)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(NeonTheme.textPrimary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(cred.username)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(isExcluded ? NeonTheme.textTertiary : NeonTheme.textPrimary)
+                        .lineLimit(1)
+                    if isExcluded {
+                        Text(isNoAccount ? "NO ACC" : "EXCLUDED")
+                            .font(.system(size: 7, weight: .black, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(isNoAccount ? NeonTheme.neonIndigo : NeonTheme.neonRed, in: .capsule)
+                    } else if !permSites.isEmpty {
+                        Text(permSites.map(\.rawValue).joined(separator: ",").uppercased())
+                            .font(.system(size: 7, weight: .black, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(NeonTheme.neonOrange, in: .capsule)
+                    }
+                }
                 HStack(spacing: 8) {
                     Text("\(cred.totalAttempts) attempts")
                         .foregroundStyle(NeonTheme.textTertiary)

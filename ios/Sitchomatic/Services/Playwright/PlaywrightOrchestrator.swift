@@ -53,7 +53,7 @@ nonisolated enum DualLoginOutcome: String, Sendable, CaseIterable {
     }
 
     var shouldRetry: Bool {
-        self == .tempDisabled || self == .error
+        self == .error
     }
 }
 
@@ -449,11 +449,12 @@ final class PlaywrightOrchestrator {
         credential: LoginCredential,
         joeURL: String,
         ignitionURL: String,
-        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
-        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome
+        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
+        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome
     ) async -> DualLoginResult {
         let startTime = Date()
         let speed = activeSpeedMode
+        let earlyStop = EarlyStopSignal()
 
         log(.dualMode, "Dual login starting — credential: \(credential.displayName), joeURL: \(joeURL), ignitionURL: \(ignitionURL)")
 
@@ -485,7 +486,7 @@ final class PlaywrightOrchestrator {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { @MainActor in
                 do {
-                    joeOutcome = try await joeFlow(pair.joePage, credential, speed)
+                    joeOutcome = try await joeFlow(pair.joePage, credential, speed, earlyStop)
                 } catch is CancellationError {
                     joeOutcome = .error
                 } catch {
@@ -496,7 +497,7 @@ final class PlaywrightOrchestrator {
 
             group.addTask { @MainActor in
                 do {
-                    ignitionOutcome = try await ignitionFlow(pair.ignitionPage, credential, speed)
+                    ignitionOutcome = try await ignitionFlow(pair.ignitionPage, credential, speed, earlyStop)
                 } catch is CancellationError {
                     ignitionOutcome = .error
                 } catch {
@@ -504,6 +505,10 @@ final class PlaywrightOrchestrator {
                     self.log(.error, "Ignition flow error: \(error.localizedDescription)")
                 }
             }
+        }
+
+        if earlyStop.isTriggered {
+            log(.dualMode, "Early-stop was triggered by \(earlyStop.triggeringSite?.rawValue ?? "unknown") — outcome: \(earlyStop.triggeringOutcome?.shortName ?? "unknown")")
         }
 
         joeScreenshot = try? await pair.joePage.screenshot()
@@ -550,8 +555,8 @@ final class PlaywrightOrchestrator {
         concurrency: Int = 6,
         joeURL: String,
         ignitionURL: String,
-        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
-        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
+        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
+        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
         onProgress: ((Int, Int, DualLoginResult) -> Void)? = nil
     ) async -> [DualLoginResult] {
         let effectiveConcurrency = min(concurrency, maxConcurrentPairs, credentials.count)

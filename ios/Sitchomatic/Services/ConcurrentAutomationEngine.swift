@@ -73,6 +73,7 @@ final class ConcurrentAutomationEngine {
     private let haptics = HapticService.shared
     private let widgetService = WidgetDataService.shared
     private let nordVPN = NordVPNRotationService.shared
+    private let exclusionList = ExclusionListService.shared
 
     var succeededCount: Int { sessions.filter { $0.phase == .succeeded }.count }
     var failedCount: Int { sessions.filter { $0.phase == .failed }.count }
@@ -201,15 +202,21 @@ final class ConcurrentAutomationEngine {
 
     func startDualRun(
         credentials: [LoginCredential],
-        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
-        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome
+        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
+        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome
     ) {
         guard state == .idle || state == .completed || state == .failed || state == .cancelled else { return }
 
         let concurrency = effectiveConcurrency
-        let enabledCredentials = credentials.filter { $0.isEnabled }
+        let enabledCredentials = credentials.filter { $0.isEnabled }.filter { cred in
+            if exclusionList.isFullyExcluded(email: cred.username) {
+                log(.phase, "Skipping \(cred.displayName) — fully excluded (perm disabled on both sites or no-account)")
+                return false
+            }
+            return true
+        }
         guard !enabledCredentials.isEmpty else {
-            log(.error, "No enabled credentials — aborting")
+            log(.error, "No eligible credentials after exclusion checks — aborting")
             return
         }
 
@@ -292,8 +299,8 @@ final class ConcurrentAutomationEngine {
     // MARK: - Retry Failed
 
     func retryFailed(
-        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
-        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome
+        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
+        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome
     ) {
         let retryable = retryQueue
         guard !retryable.isEmpty else {
@@ -396,8 +403,8 @@ final class ConcurrentAutomationEngine {
     // MARK: - Private: Dual Wave Execution
 
     private func executeWaves(
-        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
-        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome
+        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
+        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome
     ) async {
         state = .running
 
@@ -526,8 +533,8 @@ final class ConcurrentAutomationEngine {
 
     private func executePairedSession(
         _ session: ConcurrentSession,
-        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome,
-        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode) async throws -> DualLoginOutcome
+        joeFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome,
+        ignitionFlow: @escaping @Sendable @MainActor (PlaywrightPage, LoginCredential, SpeedMode, EarlyStopSignal) async throws -> DualLoginOutcome
     ) async {
         session.updatePhase(.launching)
 
@@ -606,6 +613,7 @@ final class ConcurrentAutomationEngine {
                 haptics.credentialFailure()
                 session.log(.result, "\(result.outcome.longName) — no retry")
                 updateCredentialResult(session.credential, outcome: result)
+                addToExclusionLists(credential: session.credential, result: result)
                 return
 
             case .permDisabled:
@@ -616,6 +624,7 @@ final class ConcurrentAutomationEngine {
                 haptics.credentialFailure()
                 session.log(.result, "\(result.outcome.longName) — no retry")
                 updateCredentialResult(session.credential, outcome: result)
+                addToExclusionLists(credential: session.credential, result: result)
                 if settings.nordVPNRotationEnabled {
                     log(.network, "Perm disabled detected for \(session.credential.displayName) — flagging NordVPN rotation")
                     Task { @MainActor in
@@ -624,7 +633,18 @@ final class ConcurrentAutomationEngine {
                 }
                 return
 
-            case .tempDisabled, .error:
+            case .tempDisabled:
+                session.setError(result.errorMessage ?? "Temp disabled = account confirmed")
+                session.updatePhase(.succeeded)
+                lifetimeBudget.recordDestruction()
+                lifetimeBudget.recordDestruction()
+                haptics.credentialSuccess()
+                session.log(.result, "TEMP DISABLED = account confirmed (joe: \(result.joeOutcome.shortName), ignition: \(result.ignitionOutcome.shortName)) — positive signal, no retry")
+                log(.result, "Temp disabled for \(session.credential.displayName) = 100% account exists")
+                updateCredentialResult(session.credential, outcome: result)
+                return
+
+            case .error:
                 if attempt >= maxAttempts {
                     session.setError(result.errorMessage ?? result.outcome.shortName)
                     session.updatePhase(.failed)
@@ -636,11 +656,9 @@ final class ConcurrentAutomationEngine {
                     return
                 }
 
-                if result.outcome == .error {
-                    crashRecovery.recordRecovery(pageID: session.credential.id.uuidString, phase: "paired-session")
-                    crashProtection.recordCrash()
-                    pool.reportProcessTermination()
-                }
+                crashRecovery.recordRecovery(pageID: session.credential.id.uuidString, phase: "paired-session")
+                crashProtection.recordCrash()
+                pool.reportProcessTermination()
 
                 session.log(.phase, "Attempt \(attempt): \(result.outcome.shortName) — will retry")
                 continue
@@ -693,6 +711,23 @@ final class ConcurrentAutomationEngine {
         }
         persistence.saveAttempts(attempts)
         widgetService.updateFromEngine(self)
+    }
+
+    private func addToExclusionLists(credential: LoginCredential, result: DualLoginResult) {
+        switch result.outcome {
+        case .permDisabled:
+            var sites: [AutomationSite] = []
+            if result.joeOutcome == .permDisabled { sites.append(.joe) }
+            if result.ignitionOutcome == .permDisabled { sites.append(.ignition) }
+            if sites.isEmpty { sites = [.joe, .ignition] }
+            exclusionList.addPermExclusion(email: credential.username, sites: sites)
+            log(.result, "Added \(credential.displayName) to perm-exclusion list (sites: \(sites.map(\.rawValue).joined(separator: ", ")))")
+        case .noAccount:
+            exclusionList.addNoAccountExclusion(email: credential.username)
+            log(.result, "Added \(credential.displayName) to no-account exclusion list")
+        default:
+            break
+        }
     }
 
     private func persistWaveResults(_ waveSessions: [ConcurrentSession]) {

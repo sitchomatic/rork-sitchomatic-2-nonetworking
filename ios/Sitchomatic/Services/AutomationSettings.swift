@@ -17,6 +17,7 @@ final class AutomationSettings {
     var availableSites: [AutomationSite] { AutomationSite.allCases }
     var stealthEnabled: Bool = true
     var fingerprintRotation: Bool = true
+    var maxAttemptsPerSite: Int = 4
 
     var navigationTimeoutOverride: Double = 0
     var selectorTimeoutOverride: Double = 0
@@ -65,6 +66,7 @@ final class AutomationSettings {
             "ignitionURL": ignitionURL,
             "stealthEnabled": stealthEnabled,
             "fingerprintRotation": fingerprintRotation,
+            "maxAttemptsPerSite": maxAttemptsPerSite,
             "navigationTimeoutOverride": navigationTimeoutOverride,
             "selectorTimeoutOverride": selectorTimeoutOverride,
             "webViewHardCap": webViewHardCap,
@@ -128,6 +130,7 @@ final class AutomationSettings {
         if let val = dict["ignitionURL"] as? String { ignitionURL = val }
         if let val = dict["stealthEnabled"] as? Bool { stealthEnabled = val }
         if let val = dict["fingerprintRotation"] as? Bool { fingerprintRotation = val }
+        if let val = dict["maxAttemptsPerSite"] as? Int { maxAttemptsPerSite = val }
         if let val = dict["navigationTimeoutOverride"] as? Double { navigationTimeoutOverride = val }
         if let val = dict["selectorTimeoutOverride"] as? Double { selectorTimeoutOverride = val }
         if let val = dict["webViewHardCap"] as? Int { webViewHardCap = val }

@@ -488,22 +488,24 @@ struct DualRunView: View {
 
         engine.startDualRun(
             credentials: credentials,
-            joeFlow: { page, credential, speed in
+            joeFlow: { page, credential, speed, earlyStop in
                 try await SiteLoginAutomationService.shared.executeLogin(
                     on: page,
                     site: .joe,
                     credential: credential,
                     speedMode: speed,
-                    overrideURL: settings.loginURL(for: .joe)
+                    overrideURL: settings.loginURL(for: .joe),
+                    earlyStopSignal: earlyStop
                 )
             },
-            ignitionFlow: { page, credential, speed in
+            ignitionFlow: { page, credential, speed, earlyStop in
                 try await SiteLoginAutomationService.shared.executeLogin(
                     on: page,
                     site: .ignition,
                     credential: credential,
                     speedMode: speed,
-                    overrideURL: settings.loginURL(for: .ignition)
+                    overrideURL: settings.loginURL(for: .ignition),
+                    earlyStopSignal: earlyStop
                 )
             }
         )
@@ -511,22 +513,24 @@ struct DualRunView: View {
 
     private func retryFailed() {
         engine.retryFailed(
-            joeFlow: { page, credential, speed in
+            joeFlow: { page, credential, speed, earlyStop in
                 try await SiteLoginAutomationService.shared.executeLogin(
                     on: page,
                     site: .joe,
                     credential: credential,
                     speedMode: speed,
-                    overrideURL: settings.loginURL(for: .joe)
+                    overrideURL: settings.loginURL(for: .joe),
+                    earlyStopSignal: earlyStop
                 )
             },
-            ignitionFlow: { page, credential, speed in
+            ignitionFlow: { page, credential, speed, earlyStop in
                 try await SiteLoginAutomationService.shared.executeLogin(
                     on: page,
                     site: .ignition,
                     credential: credential,
                     speedMode: speed,
-                    overrideURL: settings.loginURL(for: .ignition)
+                    overrideURL: settings.loginURL(for: .ignition),
+                    earlyStopSignal: earlyStop
                 )
             }
         )

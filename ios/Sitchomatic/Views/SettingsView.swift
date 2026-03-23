@@ -38,6 +38,7 @@ struct SettingsView: View {
                 SettingsDNSSection(settings: settings)
                 SettingsLoggingSection(settings: settings)
                 SettingsSiteURLsSection(settings: settings)
+                SettingsExclusionListSection()
                 settingsStorageSection
                 settingsAboutSection
             }
@@ -497,6 +498,16 @@ struct SettingsConcurrencySection: View {
 
             NeonToggle(label: "Auto-Retry on Failure", isOn: $settings.autoRetryOnFailure)
 
+            HStack {
+                Text("Attempts Per Site")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(NeonTheme.textSecondary)
+                Spacer()
+                Stepper("\(settings.maxAttemptsPerSite)", value: $settings.maxAttemptsPerSite, in: 1...8)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(NeonTheme.neonCyan)
+            }
+
             NeonSliderRow(
                 label: "Inter-Wave Delay",
                 valueText: String(format: "%.1fs", settings.interWaveDelaySeconds),
@@ -509,6 +520,7 @@ struct SettingsConcurrencySection: View {
         .onChange(of: settings.maxConcurrentPairs) { _, _ in settings.save() }
         .onChange(of: settings.maxRetryAttempts) { _, _ in settings.save() }
         .onChange(of: settings.autoRetryOnFailure) { _, _ in settings.save() }
+        .onChange(of: settings.maxAttemptsPerSite) { _, _ in settings.save() }
         .onChange(of: settings.interWaveDelaySeconds) { _, _ in settings.save() }
     }
 }
@@ -1039,5 +1051,63 @@ struct SettingsSiteURLsSection: View {
         let p: String = site.passwordSelectors.first ?? "n/a"
         let s: String = site.submitSelectors.first ?? "n/a"
         return "Selectors: \(u) \u{2022} \(p) \u{2022} \(s)"
+    }
+}
+
+// MARK: - Exclusion Lists
+
+struct SettingsExclusionListSection: View {
+    @State private var exclusionList = ExclusionListService.shared
+    @State private var showClearPermConfirm: Bool = false
+    @State private var showClearNoAccountConfirm: Bool = false
+
+    var body: some View {
+        NeonSettingsCard(title: "Exclusion Lists", icon: "list.bullet.rectangle") {
+            NeonSettingsRow(label: "Perm Disabled") {
+                Text("\(exclusionList.permCount) emails")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(NeonTheme.neonRed)
+            }
+
+            NeonSettingsRow(label: "No Account") {
+                Text("\(exclusionList.noAccountCount) emails")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(NeonTheme.neonIndigo)
+            }
+
+            NeonSettingsRow(label: "Total Excluded") {
+                Text("\(exclusionList.totalCount)")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(NeonTheme.textSecondary)
+            }
+
+            if exclusionList.permCount > 0 {
+                NeonDestructiveButton(title: "Clear Perm Exclusions (\(exclusionList.permCount))") {
+                    showClearPermConfirm = true
+                }
+            }
+
+            if exclusionList.noAccountCount > 0 {
+                NeonDestructiveButton(title: "Clear No-Account Exclusions (\(exclusionList.noAccountCount))") {
+                    showClearNoAccountConfirm = true
+                }
+            }
+
+            Text("Perm disabled emails are never re-tested on that site. No-account emails are never re-tested on either site. Temp disabled emails are NOT excluded.")
+                .font(.system(size: 9))
+                .foregroundStyle(NeonTheme.textTertiary)
+        }
+        .alert("Clear Perm Exclusions?", isPresented: $showClearPermConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) { exclusionList.clearPermExclusions() }
+        } message: {
+            Text("This will allow previously perm-disabled emails to be tested again.")
+        }
+        .alert("Clear No-Account Exclusions?", isPresented: $showClearNoAccountConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) { exclusionList.clearNoAccountExclusions() }
+        } message: {
+            Text("This will allow previously confirmed no-account emails to be tested again.")
+        }
     }
 }
