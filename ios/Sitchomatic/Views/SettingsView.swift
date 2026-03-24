@@ -636,11 +636,19 @@ struct SettingsStealthSection: View {
             NeonToggle(label: "Fingerprint Rotation", isOn: $settings.fingerprintRotation)
             NeonToggle(label: "Enable Tracing", isOn: $settings.enableTracing)
             NeonToggle(label: "Screenshots on Failure", isOn: $settings.captureScreenshotsOnFailure)
+            NeonToggle(label: "Block Unnecessary Graphics", isOn: $settings.blockUnnecessaryGraphics)
+
+            if settings.blockUnnecessaryGraphics {
+                Text("Hides images, videos, SVGs, and background images in WebViews to reduce bandwidth and speed up page loads.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(NeonTheme.neonGreen.opacity(0.8))
+            }
         }
         .onChange(of: settings.stealthEnabled) { _, _ in settings.save() }
         .onChange(of: settings.fingerprintRotation) { _, _ in settings.save() }
         .onChange(of: settings.enableTracing) { _, _ in settings.save() }
         .onChange(of: settings.captureScreenshotsOnFailure) { _, _ in settings.save() }
+        .onChange(of: settings.blockUnnecessaryGraphics) { _, _ in settings.save() }
     }
 }
 

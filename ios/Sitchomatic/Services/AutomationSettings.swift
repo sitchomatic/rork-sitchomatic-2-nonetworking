@@ -45,6 +45,8 @@ final class AutomationSettings {
 
     var nordVPNRotationEnabled: Bool = true
 
+    var blockUnnecessaryGraphics: Bool = false
+
     var testingStrategy: TestingStrategy = .threePasswords
 
     private let persistenceKey = "sitchomatic.v17.automationSettings"
@@ -91,6 +93,7 @@ final class AutomationSettings {
             "maxNetworkRetries": maxNetworkRetries,
             "bandwidthMonitoring": bandwidthMonitoring,
             "nordVPNRotationEnabled": nordVPNRotationEnabled,
+            "blockUnnecessaryGraphics": blockUnnecessaryGraphics,
             "testingStrategy": testingStrategy.rawValue
         ]
         UserDefaults.standard.set(dict, forKey: persistenceKey)
@@ -156,6 +159,7 @@ final class AutomationSettings {
         if let val = dict["maxNetworkRetries"] as? Int { maxNetworkRetries = val }
         if let val = dict["bandwidthMonitoring"] as? Bool { bandwidthMonitoring = val }
         if let val = dict["nordVPNRotationEnabled"] as? Bool { nordVPNRotationEnabled = val }
+        if let val = dict["blockUnnecessaryGraphics"] as? Bool { blockUnnecessaryGraphics = val }
         if let raw = dict["testingStrategy"] as? String, let strat = TestingStrategy(rawValue: raw) { testingStrategy = strat }
     }
 

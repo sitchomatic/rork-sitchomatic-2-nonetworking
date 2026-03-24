@@ -162,6 +162,23 @@ final class WebViewPool {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
 
+        if AutomationSettings.shared.blockUnnecessaryGraphics {
+            let blockGraphicsJS = """
+            (function() {
+                var style = document.createElement('style');
+                style.textContent = 'img, video, svg, canvas, [style*="background-image"], iframe[src*="youtube"], iframe[src*="vimeo"] { display: none !important; visibility: hidden !important; } * { background-image: none !important; }';
+                (document.head || document.documentElement).appendChild(style);
+                window.__sitchGraphicsBlocked = true;
+            })();
+            """
+            let userScript = WKUserScript(
+                source: blockGraphicsJS,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+            configuration.userContentController.addUserScript(userScript)
+        }
+
         let webView = WKWebView(frame: CGRect(origin: .zero, size: viewportSize), configuration: configuration)
         webView.customUserAgent = generateUserAgent()
         return webView
