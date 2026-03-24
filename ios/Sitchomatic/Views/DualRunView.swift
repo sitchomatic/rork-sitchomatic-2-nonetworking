@@ -7,6 +7,7 @@ struct DualRunView: View {
     @State private var credentials: [LoginCredential] = PersistenceService.shared.loadCredentials()
     @State private var selectedSession: ConcurrentSession?
     @State private var sessionFilter: SessionVisibilityFilter = .all
+    @State private var showLiveFeed: Bool = false
 
     var body: some View {
         ScrollView {
@@ -19,6 +20,11 @@ struct DualRunView: View {
                     activeStrategyBadge
                 }
                 liveOverviewSection
+
+                if !engine.sessions.isEmpty {
+                    liveFeedButton
+                }
+
                 categoryBreakdownSection
                 sessionSection
                 if !engine.isRunning && engine.state != .completed {
@@ -34,9 +40,43 @@ struct DualRunView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(NeonTheme.trueBlack, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
+        .navigationDestination(isPresented: $showLiveFeed) {
+            LiveTestsFeedView()
+        }
         .sheet(item: $selectedSession) { session in
             SessionProofSheet(session: session)
         }
+    }
+
+    private var liveFeedButton: some View {
+        Button {
+            showLiveFeed = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(NeonTheme.neonGreen)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Live & Completed Tests")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(NeonTheme.textPrimary)
+                    Text("\(engine.sessions.count) sessions \u{2022} Full card feed")
+                        .font(.system(size: 10))
+                        .foregroundStyle(NeonTheme.textTertiary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(NeonTheme.textTertiary)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(NeonTheme.neonGreen.opacity(0.06))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(NeonTheme.neonGreen.opacity(0.2), lineWidth: 0.5))
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Control Panel
