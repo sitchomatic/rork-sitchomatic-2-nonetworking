@@ -223,6 +223,8 @@ struct SettingsNordVPNSection: View {
     @Bindable var nordVPN: NordVPNRotationService
     @State private var isTestingShortcut: Bool = false
     @State private var testResult: String?
+    @State private var isFetchingIP: Bool = false
+    @State private var fetchedIP: String?
 
     var body: some View {
         NeonSettingsCard(title: "NordVPN Rotation", icon: "shield.checkered") {
@@ -241,6 +243,27 @@ struct SettingsNordVPNSection: View {
                     shortcutNameField(label: "Disconnect", text: $nordVPN.disconnectShortcutName)
                     shortcutNameField(label: "Reconnect", text: $nordVPN.reconnectShortcutName)
                     shortcutNameField(label: "Rotate", text: $nordVPN.rotateShortcutName)
+                    shortcutNameField(label: "Combined", text: $nordVPN.combinedShortcutName)
+                }
+
+                Divider().overlay(NeonTheme.cardBorder)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("VERIFICATION")
+                        .font(.system(size: 9, weight: .black, design: .monospaced))
+                        .foregroundStyle(NeonTheme.textTertiary)
+
+                    NeonToggle(label: "Verify IP Change", isOn: $nordVPN.verifyIPChange)
+                    NeonToggle(label: "Use x-callback-url", isOn: $nordVPN.useCallbackURL)
+
+                    NeonSliderRow(
+                        label: "Adaptive Timeout",
+                        valueText: String(format: "%.0fs", nordVPN.adaptiveTimeoutSeconds),
+                        color: NeonTheme.neonCyan,
+                        value: $nordVPN.adaptiveTimeoutSeconds,
+                        range: 5...45,
+                        step: 5
+                    )
                 }
 
                 NeonSliderRow(
@@ -251,6 +274,8 @@ struct SettingsNordVPNSection: View {
                     range: 5...60,
                     step: 5
                 )
+
+                Divider().overlay(NeonTheme.cardBorder)
 
                 NeonSettingsRow(label: "Active Strategy") {
                     Text(nordVPN.activeStrategyName)
@@ -264,14 +289,40 @@ struct SettingsNordVPNSection: View {
                         .foregroundStyle(NeonTheme.textSecondary)
                 }
 
+                NeonSettingsRow(label: "Network") {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(nordVPN.networkPathSatisfied ? NeonTheme.neonGreen : NeonTheme.neonRed)
+                            .frame(width: 6, height: 6)
+                        Text(nordVPN.networkPathSatisfied ? "Connected" : "Disconnected")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(nordVPN.networkPathSatisfied ? NeonTheme.neonGreen : NeonTheme.neonRed)
+                    }
+                }
+
                 NeonSettingsRow(label: "Status") {
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(nordVPN.isOnCooldown ? NeonTheme.neonOrange : NeonTheme.neonGreen)
+                            .fill(statusColor)
                             .frame(width: 6, height: 6)
-                        Text(nordVPN.isOnCooldown ? "Cooldown" : "Ready")
+                        Text(statusLabel)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(nordVPN.isOnCooldown ? NeonTheme.neonOrange : NeonTheme.neonGreen)
+                            .foregroundStyle(statusColor)
+                    }
+                }
+
+                if let ip = nordVPN.lastVerifiedIP ?? fetchedIP {
+                    NeonSettingsRow(label: "Current IP") {
+                        HStack(spacing: 4) {
+                            Text(ip)
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(NeonTheme.neonCyan)
+                            if nordVPN.ipChanged {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(NeonTheme.neonGreen)
+                            }
+                        }
                     }
                 }
 
@@ -285,7 +336,8 @@ struct SettingsNordVPNSection: View {
                     Button {
                         isTestingShortcut = true
                         Task {
-                            let success = await nordVPN.testShortcut(name: nordVPN.disconnectShortcutName)
+                            let name = nordVPN.combinedShortcutEnabled ? nordVPN.combinedShortcutName : nordVPN.disconnectShortcutName
+                            let success = await nordVPN.testShortcut(name: name)
                             testResult = success ? "Shortcut opened" : "Failed to open shortcut"
                             isTestingShortcut = false
                         }
@@ -324,6 +376,31 @@ struct SettingsNordVPNSection: View {
                     .opacity(nordVPN.isRotating || nordVPN.isOnCooldown ? 0.4 : 1)
                 }
 
+                Button {
+                    isFetchingIP = true
+                    Task {
+                        fetchedIP = await nordVPN.fetchCurrentIP()
+                        isFetchingIP = false
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if isFetchingIP {
+                            ProgressView().scaleEffect(0.7).tint(NeonTheme.neonCyan)
+                        }
+                        Image(systemName: "globe")
+                            .font(.system(size: 11))
+                        Text("Check IP")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundStyle(NeonTheme.neonCyan)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(NeonTheme.neonCyan.opacity(0.08), in: .rect(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(NeonTheme.neonCyan.opacity(0.2), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(isFetchingIP)
+
                 if let result = testResult {
                     Text(result)
                         .font(.system(size: 9, design: .monospaced))
@@ -333,20 +410,45 @@ struct SettingsNordVPNSection: View {
                 NeonDestructiveButton(title: "Reset NordVPN Defaults") {
                     nordVPN.resetToDefaults()
                     testResult = nil
+                    fetchedIP = nil
                 }
             }
 
-            Text("Configure Apple Shortcuts for NordVPN. Create \"NordVPN Disconnect\" and \"NordVPN Quick Connect\" shortcuts in the Shortcuts app using NordVPN's Siri Shortcuts feature.")
+            Text("Create Shortcuts in Apple Shortcuts app using NordVPN's Siri Shortcuts. For best results, use \"Combined Rotate\" strategy with a single shortcut that disconnects + reconnects. Enable \"Use x-callback-url\" for confirmed completion callbacks.")
                 .font(.system(size: 9))
                 .foregroundStyle(NeonTheme.textTertiary)
         }
         .onChange(of: nordVPN.disconnectShortcutName) { _, _ in nordVPN.save() }
         .onChange(of: nordVPN.reconnectShortcutName) { _, _ in nordVPN.save() }
         .onChange(of: nordVPN.rotateShortcutName) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.combinedShortcutName) { _, _ in nordVPN.save() }
         .onChange(of: nordVPN.cooldownSeconds) { _, _ in nordVPN.save() }
         .onChange(of: nordVPN.shortcutDisconnectReconnectEnabled) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.combinedShortcutEnabled) { _, _ in nordVPN.save() }
         .onChange(of: nordVPN.autoRotationEnabled) { _, _ in nordVPN.save() }
         .onChange(of: nordVPN.manualNotificationEnabled) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.verifyIPChange) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.adaptiveTimeoutSeconds) { _, _ in nordVPN.save() }
+        .onChange(of: nordVPN.useCallbackURL) { _, _ in nordVPN.save() }
+    }
+
+    private var statusColor: Color {
+        if nordVPN.isRotating { return NeonTheme.neonYellow }
+        if nordVPN.isOnCooldown { return NeonTheme.neonOrange }
+        return NeonTheme.neonGreen
+    }
+
+    private var statusLabel: String {
+        if nordVPN.isRotating {
+            switch nordVPN.verificationState {
+            case .waitingForDisconnect: return "Disconnecting..."
+            case .waitingForReconnect: return "Reconnecting..."
+            case .verifyingIPChange: return "Verifying IP..."
+            default: return "Rotating..."
+            }
+        }
+        if nordVPN.isOnCooldown { return "Cooldown \(String(format: "%.0f", nordVPN.cooldownRemaining))s" }
+        return "Ready"
     }
 
     private func strategyToggle(_ strategy: NordVPNRotationStrategy) -> some View {
@@ -354,6 +456,8 @@ struct SettingsNordVPNSection: View {
             switch strategy {
             case .shortcutDisconnectReconnect:
                 nordVPN.shortcutDisconnectReconnectEnabled.toggle()
+            case .combinedShortcut:
+                nordVPN.combinedShortcutEnabled.toggle()
             case .autoRotation:
                 nordVPN.autoRotationEnabled.toggle()
             case .manualNotification:
@@ -395,6 +499,7 @@ struct SettingsNordVPNSection: View {
     private func isEnabled(_ strategy: NordVPNRotationStrategy) -> Bool {
         switch strategy {
         case .shortcutDisconnectReconnect: nordVPN.shortcutDisconnectReconnectEnabled
+        case .combinedShortcut: nordVPN.combinedShortcutEnabled
         case .autoRotation: nordVPN.autoRotationEnabled
         case .manualNotification: nordVPN.manualNotificationEnabled
         }

@@ -13,6 +13,9 @@ struct SitchomaticApp: App {
                     WebViewPool.shared.handleMemoryPressure()
                     CrashProtectionService.shared.recordCrash()
                 }
+                .onOpenURL { url in
+                    NordVPNRotationService.shared.handleCallbackURL(url)
+                }
         }
     }
 }
